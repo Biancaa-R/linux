@@ -327,10 +327,11 @@ static int cs42l43_spi_probe(struct platform_device *pdev)
 	priv->ctlr = devm_spi_alloc_host(&pdev->dev, sizeof(*priv->ctlr));
 	if (!priv->ctlr)
 		return -ENOMEM;
+	//macros very specific for the struct that they point to in the code.
 
 	spi_controller_set_devdata(priv->ctlr, priv);
 
-	priv->dev = &pdev->dev;
+	priv->dev = &pdev->dev; //I dont have this implementation
 	priv->regmap = cs42l43->regmap;
 
 	priv->ctlr->prepare_message = cs42l43_prepare_message;

@@ -2066,6 +2066,12 @@ config GPIO_VIRTUSER
 	  This driver is aimed as a helper in spotting any regressions in
 	  hot-unplug handling in GPIOLIB.
 
+config GPIO_MINDGROVE_SECURE_IOT
+	tristate "Mindgrove SEcureIoT GPIO driver"
+	select GPIO_GENERIC
+	help
+	  Say Y or M here to build support for the GPIO drivers of SecureIoT chip RiscV.
+
 endmenu
 
 endif

@@ -90,10 +90,10 @@ enum ctrl_register {
  * @set_irq_mask: true if the IRQ mask needs to be set, false to clear.
  */
 struct wcove_gpio {
-	struct mutex buslock;
-	struct gpio_chip chip;
-	struct device *dev;
-	struct regmap *regmap;
+	struct mutex buslock; //just a tiny raw spinlock implementation
+	struct gpio_chip chip; //common struct in driver.h in gpio -> int for device
+	struct device *dev; //bus and the allocated driver pointing struct
+	struct regmap *regmap; //common struct in base/internal
 	struct regmap_irq_chip_data *regmap_irq_chip;
 	int update;
 	int intcnt;
@@ -407,6 +407,7 @@ static int wcove_gpio_probe(struct platform_device *pdev)
 	int virq, ret, irq;
 	struct device *dev;
 	struct gpio_irq_chip *girq;
+	//setting irq chip and irq domain
 
 	/*
 	 * This gpio platform device is created by a mfd device (see
@@ -416,36 +417,43 @@ static int wcove_gpio_probe(struct platform_device *pdev)
 	 * driver.
 	 */
 	pmic = dev_get_drvdata(pdev->dev.parent);
+	//returns the void pointer driver data of the parent struct
+	//getting the driver data 
 	if (!pmic)
 		return -ENODEV;
 
-	irq = platform_get_irq(pdev, 0);
+	irq = platform_get_irq(pdev, 0); //default
+	/* * Gets an IRQ for a platform device and prints an error message if finding the
+ 	* IRQ fails. Device drivers should check the return value for errors so as to
+ 	* not pass a negative integer value to the request_irq() APIs.*/
 	if (irq < 0)
 		return irq;
 
-	dev = &pdev->dev;
+	dev = &pdev->dev; //why ampersand here?
 
 	wg = devm_kzalloc(dev, sizeof(*wg), GFP_KERNEL);
 	if (!wg)
 		return -ENOMEM;
 
 	wg->regmap_irq_chip = pmic->irq_chip_data;
+	//passing the got pmic data to wg directly.
 
 	platform_set_drvdata(pdev, wg);
 
 	mutex_init(&wg->buslock);
-	wg->chip.label = KBUILD_MODNAME;
-	wg->chip.direction_input = wcove_gpio_dir_in;
-	wg->chip.direction_output = wcove_gpio_dir_out;
-	wg->chip.get_direction = wcove_gpio_get_direction;
-	wg->chip.get = wcove_gpio_get;
-	wg->chip.set = wcove_gpio_set;
+	wg->chip.label = KBUILD_MODNAME; //foooo ->yes
+	wg->chip.direction_input = wcove_gpio_dir_in; //->yes
+	wg->chip.direction_output = wcove_gpio_dir_out; //->yes
+	wg->chip.get_direction = wcove_gpio_get_direction; //->yes
+	wg->chip.get = wcove_gpio_get; //->yes
+	wg->chip.set = wcove_gpio_set; //-> yes
 	wg->chip.set_config = wcove_gpio_set_config;
-	wg->chip.base = -1;
-	wg->chip.ngpio = WCOVE_VGPIO_NUM;
+	wg->chip.base = -1; //yes
+	wg->chip.ngpio = WCOVE_VGPIO_NUM; //yes
 	wg->chip.can_sleep = true;
-	wg->chip.parent = pdev->dev.parent;
+	wg->chip.parent = pdev->dev.parent; //how are they defining the parent just on the own? ->yes
 	wg->chip.dbg_show = wcove_gpio_dbg_show;
+	//weird but ok
 	wg->dev = dev;
 	wg->regmap = pmic->regmap;
 

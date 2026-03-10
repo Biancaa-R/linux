@@ -13,6 +13,7 @@
 #include <linux/sysfs.h>
 #include <linux/spi/spi.h>
 #include <linux/regulator/consumer.h>
+//regulator/consumer.h to get and manage a reference regulator (Vref).
 #include <linux/err.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
@@ -25,8 +26,10 @@
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 #include <linux/iio/adc/ad_sigma_delta.h>
+//to help sigma delta functions with common patterns
 
 #include <linux/platform_data/ad7791.h>
+//platform specific details.
 
 #define AD7791_REG_COMM			0x0 /* For writes */
 #define AD7791_REG_STATUS		0x0 /* For reads */
@@ -34,15 +37,17 @@
 #define AD7791_REG_FILTER		0x2
 #define AD7791_REG_DATA			0x3
 
+//mode values to write to the mode register
 #define AD7791_MODE_CONTINUOUS		0x00
 #define AD7791_MODE_SINGLE		0x02
 #define AD7791_MODE_POWERDOWN		0x03
-
+//channel selection constants 
 #define AD7791_CH_AIN1P_AIN1N		0x00
 #define AD7791_CH_AIN2			0x01
 #define AD7791_CH_AIN1N_AIN1N		0x02
 #define AD7791_CH_AVDD_MONITOR		0x03
 
+//Filter clock divider fields and mask (bits shifted left by 4).
 #define AD7791_FILTER_CLK_DIV_1		(0x0 << 4)
 #define AD7791_FILTER_CLK_DIV_2		(0x1 << 4)
 #define AD7791_FILTER_CLK_DIV_4		(0x2 << 4)
@@ -69,11 +74,13 @@
 	{ \
 		.type = (_type), \
 		.differential = (_channel2 == -1 ? 0 : 1), \
+		//used if differential channeling is used
 		.indexed = 1, \
 		.channel = (_channel1), \
 		.channel2 = (_channel2), \
 		.address = (_address), \
 		.extend_name = (_extend_name), \
+		//optional suffix like "shorted" or "supply".
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) | \
 			BIT(IIO_CHAN_INFO_OFFSET), \
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE), \
@@ -99,7 +106,8 @@
 	__AD7991_CHANNEL(_si, _channel, -1, _address, _bits, \
 		_storagebits, _shift, NULL, IIO_VOLTAGE, \
 		 BIT(IIO_CHAN_INFO_SAMP_FREQ))
-
+		 //CHANNEL: single-ended channel (channel2 = -1), no extend_name.
+//DIFF_CHANNEL: differential channel (channel2 supplied).
 #define AD7991_DIFF_CHANNEL(_si, _channel1, _channel2, _address, _bits, \
 	_storagebits, _shift) \
 	__AD7991_CHANNEL(_si, _channel1, _channel2, _address, _bits, \
@@ -123,6 +131,15 @@ const struct iio_chan_spec name[] = { \
 		(bits), (storagebits), 0), \
 	IIO_CHAN_SOFT_TIMESTAMP(4), \
 }
+/*scan_index 0..3 are channel data, index 4 is soft timestamp.
+
+First channel: differential AIN1P–AIN1N.
+
+Second: single-ended AIN2.
+
+Third: “shorted” channel mapping AIN1N–AIN1N.
+
+Fourth: supply monitor channel.*/
 
 #define DECLARE_AD7791_CHANNELS(name, bits, storagebits) \
 const struct iio_chan_spec name[] = { \
@@ -136,9 +153,14 @@ const struct iio_chan_spec name[] = { \
 }
 
 static DECLARE_AD7787_CHANNELS(ad7787_channels, 24, 32);
+// name bits storage bits
 static DECLARE_AD7791_CHANNELS(ad7790_channels, 16, 16);
 static DECLARE_AD7791_CHANNELS(ad7791_channels, 24, 32);
+/*AD7787: 24 real bits, 32 storage bits.
 
+AD7790: 16/16.
+
+AD7791: 24 real bits stored in 32 bits.*/
 enum {
 	AD7787,
 	AD7788,
@@ -159,6 +181,7 @@ struct ad7791_chip_info {
 	unsigned int num_channels;
 	enum ad7791_chip_info_flags flags;
 };
+//Holds channel array pointer, number of channels, and flags for a chip variant.
 
 static const struct ad7791_chip_info ad7791_chip_infos[] = {
 	[AD7787] = {
@@ -195,8 +218,9 @@ struct ad7791_state {
 	struct ad_sigma_delta sd;
 	uint8_t mode;
 	uint8_t filter;
-
+	//sd: embedded ad_sigma_delta helper structure which handles common sigma-delta SPI operations.
 	struct regulator *reg;
+	//regulator handle for the reference input
 	const struct ad7791_chip_info *info;
 };
 
@@ -217,6 +241,7 @@ static struct ad7791_state *ad_sigma_delta_to_ad7791(struct ad_sigma_delta *sd)
 }
 
 static int ad7791_set_channel(struct ad_sigma_delta *sd, unsigned int channel)
+/*Calls ad_sd_set_comm(sd, channel) which writes the COMM register to select the channel (helper provided by ad_sigma_delta).*/
 {
 	ad_sd_set_comm(sd, channel);
 
@@ -242,6 +267,7 @@ static int ad7791_set_mode(struct ad_sigma_delta *sd,
 	}
 
 	st->mode &= ~AD7791_MODE_SEL_MASK;
+	//clearing of the mo
 	st->mode |= AD7791_MODE_SEL(mode);
 
 	return ad_sd_write_reg(sd, AD7791_REG_MODE, sizeof(st->mode), st->mode);
@@ -459,6 +485,7 @@ static int ad7791_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id ad7791_spi_ids[] = {
+	//entry corresponding to the top enum
 	{ "ad7787", AD7787 },
 	{ "ad7788", AD7788 },
 	{ "ad7789", AD7789 },
@@ -476,6 +503,7 @@ static struct spi_driver ad7791_driver = {
 	.id_table	= ad7791_spi_ids,
 };
 module_spi_driver(ad7791_driver);
+//registering the driver with the kernel 
 
 MODULE_AUTHOR("Lars-Peter Clausen <lars@metafoo.de>");
 MODULE_DESCRIPTION("Analog Devices AD7787/AD7788/AD7789/AD7790/AD7791 ADC driver");

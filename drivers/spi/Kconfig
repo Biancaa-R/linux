@@ -1416,6 +1416,11 @@ config SPI_OFFLOAD_TRIGGER_PWM
 	help
 	  Generic SPI offload trigger implemented using PWM output.
 
+config SPI_MINDGROVE_SECURE_IOT
+	tristate "Mindgrove Secure IoT SPI controller"
+	help
+	  Enable support for the Mindgrove SPI master controller.
+
 endif # SPI_OFFLOAD
 
 endif # SPI

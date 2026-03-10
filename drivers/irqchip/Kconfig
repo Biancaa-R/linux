@@ -818,5 +818,10 @@ config SUNPLUS_SP7021_INTC
 	  SP7021 SoC has 2 Chips: C-Chip & P-Chip. This is used as a
 	  chained controller, routing all interrupt source in P-Chip to
 	  the primary controller on C-Chip.
+config PLIC_MINDGROVE_SECURE_IOT
+	tristate "SecureIoT RiscV chip 's interrupt controller supporting 82 interrupts."
+	depends on OF
+	help
+	  Driver for custom hardware SecureIoT.
 
 endmenu

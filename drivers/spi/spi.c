@@ -52,6 +52,7 @@ static void spidev_release(struct device *dev)
 	spi_controller_put(spi->controller);
 	kfree(spi->driver_override);
 	free_percpu(spi->pcpu_statistics);
+	//mm/percpu
 	kfree(spi);
 }
 
@@ -569,6 +570,7 @@ struct spi_device *spi_alloc_device(struct spi_controller *ctlr)
 		return NULL;
 
 	spi = kzalloc(sizeof(*spi), GFP_KERNEL);
+	//allocating member for the private element in spi
 	if (!spi) {
 		spi_controller_put(ctlr);
 		return NULL;
@@ -583,6 +585,7 @@ struct spi_device *spi_alloc_device(struct spi_controller *ctlr)
 
 	spi->controller = ctlr;
 	spi->dev.parent = &ctlr->dev;
+	//why is it address of ctlr
 	spi->dev.bus = &spi_bus_type;
 	spi->dev.release = spidev_release;
 	spi->mode = ctlr->buswidth_override_bits;
@@ -4591,6 +4594,7 @@ static int __spi_sync(struct spi_device *spi, struct spi_message *message)
  *
  * Return: zero on success, else a negative error code.
  */
+//	The primary synchronous function that blocks until a sequence of transfers (spi_message) is complete. This is the main I/O primitive for most drivers.
 int spi_sync(struct spi_device *spi, struct spi_message *message)
 {
 	int ret;
@@ -4598,7 +4602,7 @@ int spi_sync(struct spi_device *spi, struct spi_message *message)
 	mutex_lock(&spi->controller->bus_lock_mutex);
 	ret = __spi_sync(spi, message);
 	mutex_unlock(&spi->controller->bus_lock_mutex);
-
+	//till the transfer is completed.
 	return ret;
 }
 EXPORT_SYMBOL_GPL(spi_sync);
@@ -4707,6 +4711,7 @@ static u8	*buf;
 int spi_write_then_read(struct spi_device *spi,
 		const void *txbuf, unsigned n_tx,
 		void *rxbuf, unsigned n_rx)
+		//	A convenience wrapper to write data from a buffer.
 {
 	static DEFINE_MUTEX(lock);
 

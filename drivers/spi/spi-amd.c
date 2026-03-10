@@ -16,6 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/spi-mem.h>
+//Private header defining struct amd_spi, version enums, etc.
 
 #include "spi-amd.h"
 
@@ -43,6 +44,12 @@
 #define AMD_SPI_MEM_SIZE	200
 #define AMD_SPI_MAX_DATA	64
 #define AMD_SPI_HID2_DMA_SIZE   4096
+//HID2 controller supports 4 KB DMA transactions
+/*FIFO starts at offset 0x80
+
+Hardware supports 64 bytes max per index-mode transaction
+
+FIFO size slightly larger due to command/address bytes*/
 
 #define AMD_SPI_ENA_REG		0x20
 #define AMD_SPI_ALT_SPD_SHIFT	20
@@ -102,7 +109,7 @@ enum amd_spi_speed {
 	F_4MHz = 0x32,
 	F_3_17MHz = 0x3F
 };
-
+//Instead, magic values are written to control registers for the control of speed of the registers.
 /**
  * struct amd_spi_freq - Matches device speed with values to write in regs
  * @speed_hz: Device frequency
@@ -110,11 +117,16 @@ enum amd_spi_speed {
  * @spd7_val: Some frequencies requires to have a value written at SPISPEED register
  */
 struct amd_spi_freq {
-	u32 speed_hz;
+	u32 speed_hz; //actual value of the frequency to be used.
 	u32 enable_val;
 	u32 spd7_val;
 };
 
+/*Centralizes MMIO access
+
+Makes endianness & pointer math correct
+
+Avoids duplicating casts everywhere*/
 static inline u8 amd_spi_readreg8(struct amd_spi *amd_spi, int idx)
 {
 	return readb((u8 __iomem *)amd_spi->io_remap_addr + idx);
@@ -174,6 +186,7 @@ static inline void amd_spi_setclear_reg32(struct amd_spi *amd_spi, int idx, u32 
 static void amd_spi_select_chip(struct amd_spi *amd_spi, u8 cs)
 {
 	amd_spi_setclear_reg8(amd_spi, AMD_SPI_ALT_CS_REG, cs, AMD_SPI_ALT_CS_MASK);
+	//Writes chip select value into ALT_CS register
 }
 
 static inline void amd_spi_clear_chip(struct amd_spi *amd_spi, u8 chip_select)
@@ -185,6 +198,9 @@ static void amd_spi_clear_fifo_ptr(struct amd_spi *amd_spi)
 {
 	amd_spi_setclear_reg32(amd_spi, AMD_SPI_CTRL0_REG, AMD_SPI_FIFO_CLEAR, AMD_SPI_FIFO_CLEAR);
 }
+/*Clears FIFO read/write pointers
+
+Required before each transaction*/
 
 static int amd_spi_set_opcode(struct amd_spi *amd_spi, u8 cmd_opcode)
 {
@@ -202,6 +218,7 @@ static int amd_spi_set_opcode(struct amd_spi *amd_spi, u8 cmd_opcode)
 	}
 }
 
+//sets the information on how many bytes to transmit and how many bytes to recieve.
 static inline void amd_spi_set_rx_count(struct amd_spi *amd_spi, u8 rx_count)
 {
 	amd_spi_writereg8(amd_spi, AMD_SPI_RX_COUNT_REG, rx_count);
@@ -232,6 +249,13 @@ static int amd_spi_busy_wait(struct amd_spi *amd_spi)
 	return readl_poll_timeout(amd_spi->io_remap_addr + reg, val,
 				  !(val & AMD_SPI_BUSY), 20, 2000000);
 }
+/*Polls until AMD_SPI_BUSY clears
+
+Uses readl_poll_timeout():
+
+Sleep 20 µs
+
+Timeout after 2 seconds*/
 
 static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
 {
@@ -265,6 +289,9 @@ static int amd_spi_host_setup(struct spi_device *spi)
 	amd_spi_clear_fifo_ptr(amd_spi);
 
 	return 0;
+	//Called by SPI core:
+	//Clears FIFO
+	//Prepares controller for transfers
 }
 
 static const struct amd_spi_freq amd_spi_freq[] = {
@@ -308,6 +335,18 @@ static void amd_set_spi_freq(struct amd_spi *amd_spi, u32 speed_hz)
 				       AMD_SPI_SPD7_MASK);
 	}
 }
+/* for settign per transfer frequency set in the system
+Find closest supported frequency
+
+Skip if already programmed
+
+Write:
+
+ALT speed bits
+
+Optional SPD7 register
+
+SPI100 bit for 100 MHz*/
 
 static inline int amd_spi_fifo_xfer(struct amd_spi *amd_spi,
 				    struct spi_controller *host,

@@ -1619,6 +1619,15 @@ config SERIAL_ESP32_ACM
 	  snippet may be used:
 	    earlycon=esp32s3acm,mmio32,0x60038000
 
+config SERIAL_MINDGROVE_SECURE_IOT
+	tristate "The custom driver implementation for serial drivers of secure iot board."
+	depends on OF
+	select SERIAL_CORE
+	select SERIAL_CORE_CONSOLE
+	select SERIAL_EARLYCON
+	help
+	  Driver for SecureIOT Riscv chip for serial communication via the tty port for custom hardware.
+
 endmenu
 
 config SERIAL_MCTRL_GPIO

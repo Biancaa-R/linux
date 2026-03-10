@@ -2362,4 +2362,10 @@ config KEEMBAY_WATCHDOG
 	  To compile this driver as a module, choose M here: the
 	  module will be called keembay_wdt.
 
+config WDT_MINDGROVE_SECURE_IOT
+		tristate "Secure IoT chip RiscV wdt"
+		select WATCHDOG_CORE
+		help
+		  Watchdog driver for SecureIoT chip from Mindgrove RiscV SoCs.
+
 endif # WATCHDOG

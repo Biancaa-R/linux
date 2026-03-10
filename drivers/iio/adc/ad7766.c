@@ -51,7 +51,7 @@ struct ad7766 {
 	 * aligned 64 bit timestamp.
 	 */
 	unsigned char data[ALIGN(3, sizeof(s64)) + sizeof(s64)]	__aligned(IIO_DMA_MINALIGN);
-};
+}; //the private structure
 
 /*
  * AD7766 and AD7767 variations are interface compatible, the main difference is
