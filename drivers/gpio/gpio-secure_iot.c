@@ -300,7 +300,7 @@ static int mindgrove_gpio_direction_input(struct gpio_chip *gc, unsigned offset)
             &gpio->GPIO_DIRECTION);
 	} else {
     pinmux = (struct GPIO_PINMUX_Type __iomem *)mindgrove->pinmux_reg_base;
-    writel(readl(pinmux->GPIO_DIRECTION) & ~BIT(offset-32),
+    writel(readl((&pinmux->GPIO_DIRECTION)) & ~BIT(offset-32),
 		        &pinmux->GPIO_DIRECTION);
 	}
   //setting the bit as 0 for input configuration.
