@@ -11,26 +11,39 @@
 //for defining the peripherals as platform device  and assign memory.
 #include <linux/watchdog.h>
 
+#ifndef __IOM
+#define __IOM volatile
+#endif
+
+#ifndef __IM
+#define __IM volatile
+#endif
+
+
+// Fix the missing types in GPIO_Type
+typedef __u32 Data;
+typedef __u32 Buf_4_8_Data;
+
 typedef struct {                                /*!< WDT Structure                                                             */
-  __IOM uint32_t  WDT_CYCLES;                   /*!< The number of cycles to count down for reset generation                   */
-  __IM  uint32_t  RESERVED;
+  __IOM __u32  WDT_CYCLES;                   /*!< The number of cycles to count down for reset generation                   */
+  __IM  __u32  RESERVED;
   
   union {
-    __IOM uint16_t WDT_CTRL;                    /*!< Control register                                                          */
+    __IOM __u16 WDT_CTRL;                    /*!< Control register                                                          */
     
     struct {
-      __IOM uint16_t WDT_CTRL_EN : 1;           /*!< Enable the watchdog timer                                                 */
-      __IOM uint16_t WDT_CTRL_MODE : 1;         /*!< Mode of watchdog timer. 0 - Interrupt, 1 - Reset                          */
-      __IOM uint16_t WDT_CTRL_SOFT : 1;         /*!< Software reset                                                            */
-            uint16_t            : 13;
+      __IOM __u16 WDT_CTRL_EN : 1;           /*!< Enable the watchdog timer                                                 */
+      __IOM __u16 WDT_CTRL_MODE : 1;         /*!< Mode of watchdog timer. 0 - Interrupt, 1 - Reset                          */
+      __IOM __u16 WDT_CTRL_SOFT : 1;         /*!< Software reset                                                            */
+            __u16            : 13;
     } WDT_CTRL_b;
   } ;
-  __IM  uint16_t  RESERVED1;
-  __IM  uint32_t  RESERVED2;
-  __IOM uint16_t  WDT_RESET_CYCLES;             /*!< The number of cycles for which the interrupt needs to be held             */
-  __IM  uint16_t  RESERVED3;
-  __IM  uint32_t  RESERVED4;
-  __IOM uint32_t  WDT_ACTIVE;                   /*!< Update the internal WD counter with the WD_CYCLES register                */
+  __IM  __u16  RESERVED1;
+  __IM  __u32  RESERVED2;
+  __IOM __u16  WDT_RESET_CYCLES;             /*!< The number of cycles for which the interrupt needs to be held             */
+  __IM  __u16  RESERVED3;
+  __IM  __u32  RESERVED4;
+  __IOM __u32  WDT_ACTIVE;                   /*!< Update the internal WD counter with the WD_CYCLES register                */
 } WDT_Type;                                     /*!< Size = 28 (0x1c)                                                          */
 
 
@@ -39,24 +52,27 @@ struct secure_iot_wdt_desc{
     unsigned int wdt_freq;
     void __iomem *base;
     WDT_Type* wdt;
-}
+};
 
 //Module parameter of the heartbeat interval 
 //HeartbeatInterval<WatchdogTimeout
 
-#define WDT_HEARTBEAT 5000
-static int heartbeat WDT_HEARTBEAT;
+#define WDT_HEARTBEAT_value 5000
+static int heartbeat =WDT_HEARTBEAT_value;
 //heartbeat =5000;
 // WE dont have provision for modifying the heart beat of the wdt
-#define WDT_CYCLES 5000
-static int wdt_cycles= WDT_CYCLES;
+#define WDT_CYCLES_value 5000
+static int wdt_cycles= WDT_CYCLES_value;
 
 // module_param(heartbeat,int ,0);
 // MODULE_PARM_DESC(heartbeat, "Watchdog heartbeats in seconds. (default="
 // 		 __MODULE_STRING(WDT_HEARTBEAT) ")");
 
 module_param(wdt_cycles,int,0);
-MODULE_PARAM_DESC(wdt_cycles,"Watchdog cycles count in seconds. (default ="__MODULE_STRING(WDT_CYCLES)")");
+// MODULE_PARAM_DESC(wdt_cycles,"Watchdog cycles count in seconds. (default ="__MODULE_STRING(WDT_CYCLES)")");
+//MODULE_PARAM_DESC(wdt_cycles, "Watchdog cycles count in seconds. (default=" __MODULE_STRING(WDT_CYCLES) ")");
+// string description = "Watchdog cycles count in seconds. (default=" + __MODULE_STRING(WDT_CYCLES_value) +")"
+// MODULE_PARAM_DESC(wdt_cycles, description);
 
 static void secure_iot_wdt_init(struct platform_device *pdev){
     dev_dbg(&pdev->dev,"Watch dog timer detected successfully in the system");
@@ -72,7 +88,7 @@ static int secure_iot_wdt_start(struct watchdog_device *wdog_dev){
     seciot_wdt->wdt->WDT_CTRL_b.WDT_CTRL_MODE=1; //reset mode of the watch dog timer
     // I think we dont need sw reset at this point
     seciot_wdt->wdt->WDT_CTRL_b.WDT_CTRL_SOFT=0;
-    secure_iot->wdt->WDT_ACTIVE=1;
+    seciot_wdt->wdt->WDT_ACTIVE=1;
     u32 cycles;
 
     cycles = wdog_dev->timeout * seciot_wdt->wdt_freq;
@@ -91,6 +107,7 @@ static int secure_iot_wdt_stop(struct watchdog_device *wdog_dev){
     //seciot_wdt->wdt->WDT_CTRL_b.WDT_CTRL_EN = 0;
     //if we want to access the entire register fullty
     seciot_wdt->wdt->WDT_CTRL &= ~BIT(0);
+    return 0;
 
 }
 
@@ -103,21 +120,21 @@ static int secure_iot_wdt_ping(struct watchdog_device *wdog_dev){
 
 }
 
-static int watchdog_active(struct watchdog_device *wdog_dev){
+static int secure_iot_watchdog_active(struct watchdog_device *wdog_dev){
     struct secure_iot_wdt_desc *seciot_wdt=watchdog_get_drvdata(wdog_dev);
-    if (seciot_wdt->wdt->WDT_ACTIVE & 0x1 ==1){
+    if ((seciot_wdt->wdt->WDT_ACTIVE & 0x1) ==1){
         //it is set so active
         return 1;
     }
     return 0;
 }
-static int secure_iot_wdt_set_timeout(struct watchdog_device *wdog_dev,uint32_t timeout){
+static int secure_iot_wdt_set_timeout(struct watchdog_device *wdog_dev,__u32 timeout){
     struct secure_iot_wdt_desc *seciot_wdt=watchdog_get_drvdata(wdog_dev);
     wdog_dev->timeout=timeout;
-    if(watchdog_active(wdog_dev)){
+    if(secure_iot_watchdog_active(wdog_dev)){
         secure_iot_wdt_stop(wdog_dev);
     }
-    wdt_cycles=timeout* (uint32_t)(sec_iot->wdt_freq);
+    wdt_cycles=timeout* (__u32)(seciot_wdt->wdt_freq);
     seciot_wdt->wdt->WDT_CYCLES=wdt_cycles;
     return secure_iot_wdt_start(wdog_dev);
     //return 0;
@@ -127,6 +144,17 @@ static const struct watchdog_info secure_iot_wdt_info={
     .options = WDIOF_SETTIMEOUT | WDIOF_MAGICCLOSE | WDIOF_KEEPALIVEPING,
     .identity ="SecureIoT watchdog",
 };
+
+static const struct watchdog_ops secure_iot_wdt_ops ={
+    .owner=THIS_MODULE,
+    .start=secure_iot_wdt_start,
+    .stop=secure_iot_wdt_stop,
+    .ping=secure_iot_wdt_ping,
+    .set_timeout=secure_iot_wdt_set_timeout,
+    //.get_timeleft=secure_iot_wdt_get_timeleft,
+    //no provision for it in hw
+};
+
 static int secure_iot_wdt_probe(struct platform_device *pdev){
     secure_iot_wdt_init(pdev);
     struct secure_iot_wdt_desc *seciot_wdt;
@@ -176,21 +204,12 @@ static int secure_iot_wdt_probe(struct platform_device *pdev){
 
 static int secure_iot_wdt_suspend(struct device*dev){
     struct secure_iot_wdt_desc *seciot_wdt =dev_get_drvdata(dev);
-    if(watchdog_active(&seciot_wdt->wdog_dev)){
+    if(secure_iot_watchdog_active(&seciot_wdt->wdog_dev)){
         secure_iot_wdt_stop(&seciot_wdt->wdog_dev);
     }
     return 0;
 }
 
-static const struct watchdog_ops secure_iot_wdt_ops ={
-    .owner=THIS_MODULE,
-    .start=secure_iot_wdt_start,
-    .stop=secure_iot_wdt_stop,
-    .ping=secure_iot_wdt_ping,
-    .set_timeout=secure_iot_wdt_set_timeout,
-    //.get_timeleft=secure_iot_wdt_get_timeleft,
-    //no provision for it in hw
-};
 
 static const struct of_device_id seciot_wdt_of_match[] ={
     { .compatible="mindgrove,secure_iot-wdt"},

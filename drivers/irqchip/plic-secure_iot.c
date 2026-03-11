@@ -121,7 +121,7 @@ static void __plic_toggle(struct plic_handler *handler, int hwirq, int enable)
 	else
 		value &= ~hwirq_mask;
 
-	((u64*)handler->enable_save[group]) = value;
+	*((u64*)handler->enable_save[group]) = value;
 	writeq(value, base + group);
 }
 
@@ -640,7 +640,7 @@ static int plic_probe(struct fwnode_handle *fwnode)
 	if (error)
 		goto fail_free_regs;
 
-	priv = kzalloc_obj(*priv);
+	priv = kzalloc(sizeof(*priv),GFP_KERNEL);
 	if (!priv) {
 		error = -ENOMEM;
 		goto fail_free_regs;
