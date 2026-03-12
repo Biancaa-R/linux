@@ -10,6 +10,8 @@
 #include <linux/completion.h>
 #include <linux/err.h>
 #include <linux/errno.h>
+#include <linux/device.h>
+
 
 #define SECURE_IOT_SPI_DRIVER_NAME       "secure_iot_spi"
 #define MINDGROVE_SPI_MAX_CS 4
@@ -101,9 +103,12 @@
 struct secure_iot_spi{
     void __iomem *regs; /*virt address of the control registers*/
     struct clk *clk;    /*bus clk set from the dts file*/
+    __u8 cs_inactive;
     unsigned int fifo_depth;
     struct completion done;
-    u32 polling; //1 for polling , 0 for interrupt based.
+    struct completion tx_done;
+    struct completion rx_done;
+    __u32 polling; //1 for polling , 0 for interrupt based.
 };
 
 static int secure_iot_spi_init(struct secure_iot_spi *spi){
@@ -145,7 +150,7 @@ static int mindgrove_spi_set_mode(struct spi_controller *host, uint mode)
 	u8 ncs_ctrl = 0;
 
 	/* Switch clock mode bits */
-	clk_ctrl = readl(spi->base + MINDGROVE_SPI_REG_CLK_CTRL);
+	clk_ctrl = readl(spi->regs + MINDGROVE_SPI_REG_CLK_CTRL);
 	clk_ctrl &= ~(MINDGROVE_SPI_CLK_CTRL_POLARITY | MINDGROVE_SPI_CLK_CTRL_PHASE);
 
 	if (mode & SPI_CPHA)
@@ -153,42 +158,42 @@ static int mindgrove_spi_set_mode(struct spi_controller *host, uint mode)
 	if (mode & SPI_CPOL)
 		clk_ctrl |= MINDGROVE_SPI_CLK_CTRL_POLARITY;
 
-	writel(clk_ctrl, spi->base + MINDGROVE_SPI_REG_CLK_CTRL);
+	writel(clk_ctrl, spi->regs + MINDGROVE_SPI_REG_CLK_CTRL);
 
 	/* Set LSB first if required */
 	if (mode & SPI_LSB_FIRST)
 	{
-		u32 ctrl = readl(spi->base + MINDGROVE_SPI_REG_CTRL) |
+		u32 ctrl = readl(spi->regs + MINDGROVE_SPI_REG_CTRL) |
 				   MINDGROVE_SPI_CTRL_LSBFIRST(1);
-		writel(ctrl, spi->base + MINDGROVE_SPI_REG_CTRL);
+		writel(ctrl, spi->regs + MINDGROVE_SPI_REG_CTRL);
 	}
 	/* Configure NCS control for software mode */
-	ncs_ctrl = readl(spi->base + MINDGROVE_SPI_REG_NCS_CTRL) |
+	ncs_ctrl = readl(spi->regs + MINDGROVE_SPI_REG_NCS_CTRL) |
 			   MINDGROVE_SPI_NCS_CTRL_SELECT(1);
 
 	/* Update the chip select polarity */
 	if (mode & SPI_CS_HIGH)
 		ncs_ctrl |= MINDGROVE_SPI_NCS_CTRL_SW(1);
 
-	writeb(ncs_ctrl, spi->base + MINDGROVE_SPI_REG_NCS_CTRL);
+	writeb(ncs_ctrl, spi->regs + MINDGROVE_SPI_REG_NCS_CTRL);
 	return 0;
 }
 
 static int secure_iot_spi_prep_transfer(struct secure_iot_spi *spi, struct spi_device *device , struct spi_transfer *t)
 {
     //for clk control we setup the prescalar.
-    uint8_t prescalar = DIV_ROUND_UP(clk_get_rate(spi->clk)>>1 ,t->speed_hz -1);
+    __u8 prescalar = DIV_ROUND_UP(clk_get_rate(spi->clk)>>1 ,t->speed_hz -1);
     unsigned int mode;
     prescalar =3;
-    uint32_t prev_clk = readl(spi->regs+MINDGROVE_SPI_REG_CLK_CTRL);
+    __u32 prev_clk = readl(spi->regs+MINDGROVE_SPI_REG_CLK_CTRL);
     prev_clk &= SPI_CLK_PRESCALE(0);
     prev_clk |= SPI_CLK_PRESCALE(prescalar);
     writel(prev_clk,spi->regs+MINDGROVE_SPI_REG_CLK_CTRL);
     //pre scalar configuration made
     /* Mode size setup for fifo block output */
     mode = max_t(unsigned int, t->rx_nbits, t->tx_nbits);
-    uint32_t ctrl_spi = readl(spi->regs+MINDGROVE_SPI_REG_CTRL);
-    ctrl = (MINDGROVE_SPI_CTRL_COMM_MODE(MINDGROVE_SPI_COMM_MODE_FULL_DUPLEX));
+    __u32 ctrl_spi = readl(spi->regs+MINDGROVE_SPI_REG_CTRL);
+    ctrl_spi = (MINDGROVE_SPI_CTRL_COMM_MODE(MINDGROVE_SPI_COMM_MODE_FULL_DUPLEX));
     /*Setting the mode of transaction in spi */
     ctrl_spi &= ~(MINDGROVE_SPI_CTRL_TOTAL_BIT_TX_MASK| MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(0xFF) );   //remove tx configuration.
     ctrl_spi &= ~(MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK| MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(0xFF) );   //remove rx configuration.
@@ -295,7 +300,7 @@ static void secure_iot_spi_wait (struct secure_iot_spi *spi, u32 bit, int poll){
 
         /*Save the state if needed */
         reinit_completion(&spi->done);
-        writel(intr_en, &regs->INTR_EN);
+        writel(intr_en, &spi->regs+MINDGROVE_SPI_REG_INTR_EN);
         wait_for_completion(&spi->done);
 
         /*optionally clear interrupt*/
@@ -324,7 +329,7 @@ static int secure_iot_spi_transfer_one(struct spi_controller *host, struct spi_d
     int poll = secure_iot_spi_prep_transfer(spi,device ,t);
     // as a transceive function operation:
     const u8 *tx_ptr = t->tx_buf;
-    u8 *rx_ptr = t->rx_buf;
+    u8* rx_ptr = t->rx_buf;
     unsigned int remaining_words = t->len;
 
     while(remaining_words){
@@ -511,6 +516,7 @@ static struct platform_driver mindgrove_spi_driver = {
 		.of_match_table = mindgrove_spi_of_match,
 	},
 };
+
 module_platform_driver(mindgrove_spi_driver);
 
 MODULE_AUTHOR("Biancaa Ramesh <biancaa2210329@ssn.edu.in>");
