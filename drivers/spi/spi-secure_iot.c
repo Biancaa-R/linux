@@ -195,8 +195,11 @@ static int secure_iot_spi_prep_transfer(struct secure_iot_spi *spi, struct spi_d
     __u32 ctrl_spi = readl(spi->regs+MINDGROVE_SPI_REG_CTRL);
     ctrl_spi = (MINDGROVE_SPI_CTRL_COMM_MODE(MINDGROVE_SPI_COMM_MODE_FULL_DUPLEX));
     /*Setting the mode of transaction in spi */
-    ctrl_spi &= ~(MINDGROVE_SPI_CTRL_TOTAL_BIT_TX_MASK| MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(0xFF) );   //remove tx configuration.
-    ctrl_spi &= ~(MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK| MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(0xFF) );   //remove rx configuration.
+    // ctrl_spi &= ~(MINDGROVE_SPI_CTRL_TOTAL_BIT_TX_MASK| MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(0xFF) );   //remove tx configuration.
+    // ctrl_spi &= ~(MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK| MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(0xFF) );   //remove rx configuration.
+    ctrl_spi &= ~MINDGROVE_SPI_CTRL_TOTAL_BIT_TX_MASK;
+    ctrl_spi &= ~MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK;
+    ctrl_spi &= ~MINDGROVE_SPI_CTRL_COMM_MODE_MASK;
 
     switch(mode){
         case 8:
@@ -218,7 +221,7 @@ static int secure_iot_spi_prep_transfer(struct secure_iot_spi *spi, struct spi_d
     }
 
     if(device->mode & SPI_LSB_FIRST){
-        ctrl_spi | MINDGROVE_SPI_CTRL_LSBFIRST(1);
+        ctrl_spi |= MINDGROVE_SPI_CTRL_LSBFIRST(1);
     }
     ctrl_spi |= (MINDGROVE_SPI_CTRL_SCLK_OUTEN |
 			MINDGROVE_SPI_CTRL_NCS_OUTEN |
@@ -227,7 +230,7 @@ static int secure_iot_spi_prep_transfer(struct secure_iot_spi *spi, struct spi_d
 	/* Configure control register */
 	ctrl_spi |= MINDGROVE_SPI_CTRL_EN(1);
     /*Assuming we finished all the changes to be done for spi*/
-    writel(spi->regs+MINDGROVE_SPI_REG_CTRL,ctrl_spi);
+    writel(ctrl_spi,spi->regs+MINDGROVE_SPI_REG_CTRL);
     mindgrove_spi_set_mode(spi, device->mode);
 
 }
@@ -236,15 +239,17 @@ static irqreturn_t secure_iot_spi_irq(int irq, void *dev_id)
 {
     struct secure_iot_spi *spi = dev_id;
     u32 intr_en , fifo_status;
-    intr_en = spi->regs + MINDGROVE_SPI_REG_INTR_EN;
-    fifo_status = spi->regs + MINDGROVE_SPI_REG_FIFO_STATUS;
+    intr_en = readl(spi->regs + MINDGROVE_SPI_REG_INTR_EN);
+    fifo_status = readl(spi->regs + MINDGROVE_SPI_REG_FIFO_STATUS);
     if((intr_en & MINDGROVE_SPI_INTR_TX_FIFO_HALF) && (fifo_status & MINDGROVE_SPI_FREQ_STATUS_RX_HALF)){
         complete(&spi->rx_done);
+        complete(&spi->done);
         /*Rx half fifo interrupt*/
         return IRQ_HANDLED;
     }
     if((intr_en & MINDGROVE_SPI_INTR_TX_FIFO_EMPTY)&& fifo_status & MINDGROVE_SPI_FIFO_STATUS_TX_EMPTY){
         complete(&spi->tx_done);
+        complete(&spi->done);
         return IRQ_HANDLED;
     }
     return IRQ_NONE;
@@ -272,7 +277,10 @@ static void secure_iot_spi_wait (struct secure_iot_spi *spi, u32 bit, int poll){
             comm_status = readw(spi->regs +MINDGROVE_SPI_REG_COMM_STATUS);
             bool tx_idle = (fifo_status & MINDGROVE_SPI_FIFO_STATUS_TX_EMPTY);
             bool rx_full = (fifo_status & MINDGROVE_SPI_FIFO_STATUS_RX_FULL);
-            bool busy = (fifo_status & SECURE_IOT_SPI_WAIT_BUSY_CLR);
+            //bool busy = (fifo_status & SECURE_IOT_SPI_WAIT_BUSY_CLR);
+            bool busy    = (comm_reg & MINDGROVE_SPI_COMM_STATUS_BUSY);
+            //Check functioning 
+            
             //Check conditions based on bit mask :
             if((bit & SECURE_IOT_SPI_WAIT_TX_IDLE) && tx_idle){
                 if( !(bit & SECURE_IOT_SPI_WAIT_BUSY_CLR) || !busy){
@@ -300,7 +308,7 @@ static void secure_iot_spi_wait (struct secure_iot_spi *spi, u32 bit, int poll){
 
         /*Save the state if needed */
         reinit_completion(&spi->done);
-        writel(intr_en, &spi->regs+MINDGROVE_SPI_REG_INTR_EN);
+        writel(intr_en, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
         wait_for_completion(&spi->done);
 
         /*optionally clear interrupt*/
@@ -420,6 +428,10 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
         goto put_host;
     }
 
+    if (of_property_read_u32(pdev->dev.of_node, "num-cs", &num_cs))
+        num_cs = 1; // Default to 1 if not in DTS
+
+
     /*defining of the host for argument passing*/
     host->bus_num = pdev->id;
     host->num_chipselect = num_cs;
@@ -430,6 +442,8 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
     host->set_cs = secure_iot_spi_set_cs;
     host->transfer_one = secure_iot_spi_transfer_one;
     pdev->dev.dma_mask =NULL;
+    spi->polling=1; 
+    /*Initial flag check for fully using polling for transfer.*/
     /*configure spi host hardware*/
     secure_iot_spi_init(spi);
     /*register for spi interrupt*/
