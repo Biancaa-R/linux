@@ -526,7 +526,7 @@ static int plic_starting_cpu(unsigned int cpu)
 }
 
 static const struct of_device_id plic_match[] = {
-	{ .compatible = "riscv,plic1" },
+	{ .compatible = "mindgrove,plic" },
 	{}
 };
 
@@ -825,7 +825,7 @@ static int plic_platform_probe(struct platform_device *pdev)
 
 static struct platform_driver plic_driver = {
 	.driver = {
-		.name		= "riscv-plic",
+		.name		= "mindgrove-plic",
 		.of_match_table	= plic_match,
 		.suppress_bind_attrs = true,
 		.acpi_match_table = ACPI_PTR(plic_acpi_match),
