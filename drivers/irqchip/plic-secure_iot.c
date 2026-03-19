@@ -765,6 +765,12 @@ done:
 			}
 		}
 
+		// To simply check if at least ONE handler is present:
+		//Making it compatible for single core secureiot.
+		if (nr_handlers > 0) { 
+    		global_setup = true; 
+		}
+
 		if (global_setup) {
 			void (*handler_fn)(struct irq_desc *) = plic_handle_irq;
 
@@ -840,4 +846,4 @@ static int __init plic_early_probe(struct device_node *node,
 	return plic_probe(&node->fwnode);
 }
 
-IRQCHIP_DECLARE(riscv, "allwinner,sun20i-d1-plic", plic_early_probe);
+IRQCHIP_DECLARE(riscv, "mindgrove,plic", plic_early_probe);
