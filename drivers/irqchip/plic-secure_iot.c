@@ -611,6 +611,8 @@ static int plic_parse_context_parent(struct fwnode_handle *fwnode, u32 context,
 
 static int plic_probe(struct fwnode_handle *fwnode)
 {
+	printk("Start of the plic probe function\n");
+	printk("*************************************\n");
 	int error = 0, nr_contexts, nr_handlers = 0, cpu, i;
 	unsigned long plic_quirks = 0;
 	struct plic_handler *handler;
