@@ -109,6 +109,7 @@ struct secure_iot_spi{
     struct completion tx_done;
     struct completion rx_done;
     __u32 polling; //1 for polling , 0 for interrupt based.
+    struct device *dev;
 };
 
 static int secure_iot_spi_init(struct secure_iot_spi *spi){
@@ -129,6 +130,7 @@ static int secure_iot_spi_init(struct secure_iot_spi *spi){
 
 	/* Configure NCS for software control */
 	writeb(MINDGROVE_SPI_NCS_CTRL_SELECT(1), spi->regs + MINDGROVE_SPI_REG_NCS_CTRL);
+    return 0;
 }
 
 static int secure_iot_spi_prepare_message(struct spi_controller *host, struct spi_message *msg)
@@ -232,6 +234,7 @@ static int secure_iot_spi_prep_transfer(struct secure_iot_spi *spi, struct spi_d
     /*Assuming we finished all the changes to be done for spi*/
     writel(ctrl_spi,spi->regs+MINDGROVE_SPI_REG_CTRL);
     mindgrove_spi_set_mode(spi, device->mode);
+    return spi->polling;
 
 }
 
@@ -267,8 +270,8 @@ static void secure_iot_spi_wait (struct secure_iot_spi *spi, u32 bit, int poll){
     unsigned long timeout = 1000000;
     int use_polling = poll;
     if(use_polling){
-        u32 fifo_status;
-        u16 comm_status;
+        __u32 fifo_status;
+        __u16 comm_status;
 
         /*polling loop*/
         /*Polling mode for faster transfers */
@@ -278,7 +281,7 @@ static void secure_iot_spi_wait (struct secure_iot_spi *spi, u32 bit, int poll){
             bool tx_idle = (fifo_status & MINDGROVE_SPI_FIFO_STATUS_TX_EMPTY);
             bool rx_full = (fifo_status & MINDGROVE_SPI_FIFO_STATUS_RX_FULL);
             //bool busy = (fifo_status & SECURE_IOT_SPI_WAIT_BUSY_CLR);
-            bool busy    = (comm_reg & MINDGROVE_SPI_COMM_STATUS_BUSY);
+            bool busy    = (comm_status & MINDGROVE_SPI_COMM_STATUS_BUSY);
             //Check functioning 
             
             //Check conditions based on bit mask :
@@ -385,8 +388,9 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
         return -ENOMEM;
     }
     spi =spi_controller_get_devdata(host);
+    spi->dev = &pdev->dev;
     init_completion(&spi->done);
-    platform_get_drvdata(pdev,host);
+    platform_set_drvdata(pdev,host);
 
     spi->regs = devm_platform_ioremap_resource(pdev,0);
     if(IS_ERR(spi->regs)){
