@@ -255,8 +255,8 @@ static void __iomem *mindgrove_get_base(
 // #define GPIO_PINMUX_BASE            0x00040300UL
 // #define GPIO_BASE                   0x00040200UL
 // #define IORESOURCE_MEM         GPIO_BASE
-#define GPIO_LINE_DIRECTION_IN	1
-#define GPIO_LINE_DIRECTION_OUT	0
+#define GPIO_LINE_DIRECTION_IN	0
+#define GPIO_LINE_DIRECTION_OUT	1
 // #define GPIO_REG ((GPIO_Type*)(GPIO_BASE))
 // //in the physical mapping have to be changed in probe implementation -> dummy for now
 // #define GPIO_PINMUX_REG ((GPIO_PINMUX_Type*)(GPIO_PINMUX_BASE))
@@ -446,7 +446,7 @@ static int mindgrove_gpio_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id mindgrove_gpio_of_match[] = {
-	{ .compatible = "mindgrove,secure-iot-gpio", },
+	{ .compatible = "mindgrove,gpio", },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, mindgrove_gpio_of_match);

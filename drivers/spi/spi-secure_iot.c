@@ -10,6 +10,7 @@
 #include <linux/completion.h>
 #include <linux/err.h>
 #include <linux/errno.h>
+#include <linux/delay.h>
 #include <linux/device.h>
 
 
@@ -145,9 +146,9 @@ static int secure_iot_spi_prepare_message(struct spi_controller *host, struct sp
     return 0;
 }
 
-static int mindgrove_spi_set_mode(struct spi_controller *host, uint mode)
+static int mindgrove_spi_set_mode(struct secure_iot_spi *spi, uint mode)
 {
-	struct secure_iot_spi *spi = spi_controller_get_devdata(host);
+	//struct secure_iot_spi *spi = spi_controller_get_devdata(host);
 	u32 clk_ctrl;
 	u8 ncs_ctrl = 0;
 
@@ -258,7 +259,7 @@ static irqreturn_t secure_iot_spi_irq(int irq, void *dev_id)
     return IRQ_NONE;
 }
 
-static void secure_iot_spi_set_cs(struct spi_device *device)
+static void secure_iot_spi_set_cs(struct spi_device *device,bool is_high)
 {
     struct secure_iot_spi *spi = spi_controller_get_devdata(device->controller);
     writel(MINDGROVE_SPI_NCS_CTRL_SW(0)|MINDGROVE_SPI_NCS_CTRL_SELECT(1), spi->regs+MINDGROVE_SPI_REG_NCS_CTRL);
@@ -449,6 +450,7 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
     spi->polling=1; 
     /*Initial flag check for fully using polling for transfer.*/
     /*configure spi host hardware*/
+
     secure_iot_spi_init(spi);
     /*register for spi interrupt*/
     ret = devm_request_irq(&pdev->dev , irq , secure_iot_spi_irq, 0, dev_name(&pdev->dev),spi);
@@ -463,6 +465,11 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
         dev_err(&pdev->dev ,"Spi register host failed to happen !\n");
         goto disable_clk;
     }
+
+    init_completion(&spi->done);
+    init_completion(&spi->tx_done);   // ADD THIS
+    init_completion(&spi->rx_done);   // ADD THIS
+
     return 0;
 
     disable_clk:
