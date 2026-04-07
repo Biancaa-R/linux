@@ -255,8 +255,8 @@ static void __iomem *mindgrove_get_base(
 // #define GPIO_PINMUX_BASE            0x00040300UL
 // #define GPIO_BASE                   0x00040200UL
 // #define IORESOURCE_MEM         GPIO_BASE
-#define GPIO_LINE_DIRECTION_IN	0
-#define GPIO_LINE_DIRECTION_OUT	1
+#define GPIO_LINE_DIRECTION_IN	1
+#define GPIO_LINE_DIRECTION_OUT	0
 // #define GPIO_REG ((GPIO_Type*)(GPIO_BASE))
 // //in the physical mapping have to be changed in probe implementation -> dummy for now
 // #define GPIO_PINMUX_REG ((GPIO_PINMUX_Type*)(GPIO_PINMUX_BASE))
@@ -296,11 +296,11 @@ static int mindgrove_gpio_direction_input(struct gpio_chip *gc, unsigned offset)
   struct GPIO_PINMUX_Type __iomem *pinmux;
 	if (offset < 32) {
     gpio = (struct GPIO_Type __iomem *)mindgrove->reg_base;
-    writel(readl(&(gpio->GPIO_DIRECTION))& ~BIT(offset),
+    writel(readl(&(gpio->GPIO_DIRECTION)) | BIT(offset),
             &gpio->GPIO_DIRECTION);
 	} else {
     pinmux = (struct GPIO_PINMUX_Type __iomem *)mindgrove->pinmux_reg_base;
-    writel(readl((&pinmux->GPIO_DIRECTION)) & ~BIT(offset-32),
+    writel(readl((&pinmux->GPIO_DIRECTION)) | BIT(offset-32),
 		        &pinmux->GPIO_DIRECTION);
 	}
   //setting the bit as 0 for input configuration.
@@ -315,7 +315,7 @@ static int mindgrove_gpio_direction_output(struct gpio_chip *gc, unsigned offset
   struct GPIO_PINMUX_Type __iomem *pinmux;
 	if (offset < 32) {
     gpio = (struct GPIO_Type __iomem *)mindgrove->reg_base;
-    writel((readl(&gpio->GPIO_DIRECTION) | BIT(offset)),
+    writel((readl(&gpio->GPIO_DIRECTION) & ~BIT(offset)),
             &gpio->GPIO_DIRECTION);
 		if (value)
       writel((readl(&(gpio->GPIO_SET))|BIT(offset)),&gpio->GPIO_SET);
@@ -323,7 +323,7 @@ static int mindgrove_gpio_direction_output(struct gpio_chip *gc, unsigned offset
       writel((readl(&(gpio->GPIO_CLEAR))|BIT(offset)),&gpio->GPIO_CLEAR);
 	} else {
     pinmux = (struct GPIO_PINMUX_Type __iomem *)mindgrove->pinmux_reg_base;
-    writel((readl(&pinmux->GPIO_DIRECTION) | BIT(offset-32)),
+    writel((readl(&pinmux->GPIO_DIRECTION) &  ~BIT(offset-32)),
               &pinmux->GPIO_DIRECTION);
 		if (value)
       writel((readl(&(pinmux->GPIO_SET))|BIT(offset-32)),&pinmux->GPIO_SET);

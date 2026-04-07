@@ -12,6 +12,8 @@
 #include <linux/errno.h>
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/iopoll.h>
+#include <linux/types.h>
 
 
 #define SECURE_IOT_SPI_DRIVER_NAME       "secure_iot_spi"
@@ -48,10 +50,10 @@
 #define MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(x) ((x) << 6)
 #define MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK GENMASK(21, 14)
 #define MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(x) ((x) << 14)
-#define MINDGROVE_SPI_CTRL_SCLK_OUTEN ((uint32_t)1UL << 22)
-#define MINDGROVE_SPI_CTRL_NCS_OUTEN ((uint32_t)1UL << 23)
-#define MINDGROVE_SPI_CTRL_MISO_OUTEN ((uint32_t)1UL << 24)
-#define MINDGROVE_SPI_CTRL_MOSI_OUTEN ((uint32_t)1UL << 25)
+#define MINDGROVE_SPI_CTRL_SCLK_OUTEN ((u32)1UL << 22)
+#define MINDGROVE_SPI_CTRL_NCS_OUTEN ((u32)1UL << 23)
+#define MINDGROVE_SPI_CTRL_MISO_OUTEN ((u32)1UL << 24)
+#define MINDGROVE_SPI_CTRL_MOSI_OUTEN ((u32)1UL << 25)
 
 /* CLK_CTRL register bit definitions */
 #define MINDGROVE_SPI_CLK_CTRL_POLARITY BIT(0)
@@ -134,6 +136,9 @@ static int secure_iot_spi_init(struct secure_iot_spi *spi){
     return 0;
 }
 
+static int secure_iot_spi_interrupt_enable(struct secure_iot_spi *spi){
+    writel(0xffffffff,spi->regs+MINDGROVE_SPI_REG_INTR_EN);
+}
 static int secure_iot_spi_prepare_message(struct spi_controller *host, struct spi_message *msg)
 {
     struct secure_iot_spi *spi =spi_controller_get_devdata(host);
@@ -146,7 +151,7 @@ static int secure_iot_spi_prepare_message(struct spi_controller *host, struct sp
     return 0;
 }
 
-static int mindgrove_spi_set_mode(struct secure_iot_spi *spi, uint mode)
+static int mindgrove_spi_set_mode(struct secure_iot_spi *spi, u32 mode)
 {
 	//struct secure_iot_spi *spi = spi_controller_get_devdata(host);
 	u32 clk_ctrl;
@@ -245,25 +250,58 @@ static irqreturn_t secure_iot_spi_irq(int irq, void *dev_id)
     u32 intr_en , fifo_status;
     intr_en = readl(spi->regs + MINDGROVE_SPI_REG_INTR_EN);
     fifo_status = readl(spi->regs + MINDGROVE_SPI_REG_FIFO_STATUS);
-    if((intr_en & MINDGROVE_SPI_INTR_TX_FIFO_HALF) && (fifo_status & MINDGROVE_SPI_FREQ_STATUS_RX_HALF)){
-        complete(&spi->rx_done);
-        complete(&spi->done);
-        /*Rx half fifo interrupt*/
-        return IRQ_HANDLED;
-    }
     if((intr_en & MINDGROVE_SPI_INTR_TX_FIFO_EMPTY)&& fifo_status & MINDGROVE_SPI_FIFO_STATUS_TX_EMPTY){
+        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
         complete(&spi->tx_done);
         complete(&spi->done);
         return IRQ_HANDLED;
     }
+    if((intr_en & MINDGROVE_SPI_INTR_TX_FIFO_HALF) && (fifo_status & MINDGROVE_SPI_FIFO_STATUS_TX_HALF)){
+        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
+        complete(&spi->tx_done);
+        complete(&spi->done);
+        /*Tx half fifo interrupt*/
+        return IRQ_HANDLED;
+    }
+    if((intr_en & MINDGROVE_SPI_INTR_TX_FULL) && (fifo_status & MINDGROVE_SPI_FIFO_STATUS_TX_FULL)){
+        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
+        complete(&spi->tx_done);
+        complete(&spi->done);
+        return IRQ_HANDLED;
+    }
+    if((intr_en & MINDGROVE_SPI_INTR_RX_EMPTY ) && (fifo_status & MINDGROVE_SPI_FIFO_STATUS_RX_EMPTY)){
+        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
+        complete(&spi->rx_done);
+        complete(&spi->done);
+        return IRQ_HANDLED;
+    }
+    if((intr_en & MINDGROVE_SPI_INTR_RX_HALF ) && (fifo_status & MINDGROVE_SPI_FREQ_STATUS_RX_HALF)){
+        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
+        complete(&spi->rx_done);
+        complete(&spi->done);
+        return IRQ_HANDLED;
+    }
+    if((intr_en & MINDGROVE_SPI_INTR_RX_FULL ) && (fifo_status & MINDGROVE_SPI_FIFO_STATUS_RX_FULL)){
+        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
+        complete(&spi->rx_done);
+        complete(&spi->done);
+        return IRQ_HANDLED;
+    }
+    writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
+    
     return IRQ_NONE;
 }
 
-static void secure_iot_spi_set_cs(struct spi_device *device,bool is_high)
+static void secure_iot_spi_set_cs(struct spi_device *device, bool is_high)
 {
     struct secure_iot_spi *spi = spi_controller_get_devdata(device->controller);
-    writel(MINDGROVE_SPI_NCS_CTRL_SW(0)|MINDGROVE_SPI_NCS_CTRL_SELECT(1), spi->regs+MINDGROVE_SPI_REG_NCS_CTRL);
+    if(is_high){
+        writel(MINDGROVE_SPI_NCS_CTRL_SW(1)|MINDGROVE_SPI_NCS_CTRL_SELECT(1), spi->regs+MINDGROVE_SPI_REG_NCS_CTRL);
+    }
     //setting the chip select value to low to turn on.
+    else{
+        writel(MINDGROVE_SPI_NCS_CTRL_SW(0)|MINDGROVE_SPI_NCS_CTRL_SELECT(1), spi->regs+MINDGROVE_SPI_REG_NCS_CTRL);
+    }
 }
 
 // spi wait for completion logic : 
@@ -316,13 +354,34 @@ static void secure_iot_spi_wait (struct secure_iot_spi *spi, u32 bit, int poll){
         wait_for_completion(&spi->done);
 
         /*optionally clear interrupt*/
-        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
+        //writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
     }
+}
+
+static int secure_iot_spi_wait_rx_data(struct secure_iot_spi *spi)
+{
+    u32 status;
+    return readl_poll_timeout_atomic(spi->regs + MINDGROVE_SPI_REG_FIFO_STATUS, 
+                                     status, !(status & MINDGROVE_SPI_FIFO_STATUS_RX_EMPTY), 
+                                     1, 100000);
+}
+
+static int secure_iot_spi_wait_tx_data(struct secure_iot_spi *spi)
+{
+    u32 status;
+    
+    /* * Read FIFO_STATUS until TX_EMPTY (Bit 0) is 1.
+     * Check every 1us, timeout after 100ms (100,000us).
+     */
+    return readl_poll_timeout_atomic(spi->regs + MINDGROVE_SPI_REG_FIFO_STATUS, 
+                                     status, (status & MINDGROVE_SPI_FIFO_STATUS_TX_FULL), 
+                                     1, 100000);
 }
 
 static void secure_iot_spi_tx(struct secure_iot_spi *spi, const u8 *tx_ptr)
 {
     WARN_ON_ONCE((readl(spi->regs+MINDGROVE_SPI_REG_FIFO_STATUS)& MINDGROVE_SPI_INTR_TX_FULL) != 0);
+    //If tx is already full we cant write in new data for filling it in right.
     writel(*tx_ptr, spi->regs+MINDGROVE_SPI_REG_TX );
 }
 
@@ -330,6 +389,7 @@ static void secure_iot_spi_rx(struct secure_iot_spi *spi, u8 *rx_ptr)
 {
     u32 data = readl(spi->regs+MINDGROVE_SPI_REG_RX);
     WARN_ON_ONCE((readl(spi->regs+MINDGROVE_SPI_REG_FIFO_STATUS)&MINDGROVE_SPI_INTR_RX_EMPTY)!=0);
+    //If rx is already empty we cant read new data from the rx buffer.
     *rx_ptr = data;
     /*no nedd to mask it as its the entire data segment.*/
 }
@@ -355,11 +415,19 @@ static int secure_iot_spi_transfer_one(struct spi_controller *host, struct spi_d
         /*rx logic with delay passing */
 
         //sending of data using delay in between.
-        secure_iot_spi_tx(spi,tx_ptr++);
         //calling of the wait function.
-        secure_iot_spi_wait(spi, SECURE_IOT_SPI_WAIT_TX_IDLE, spi->polling);
+        //secure_iot_spi_wait(spi, SECURE_IOT_SPI_WAIT_TX_IDLE, spi->polling);
+        //secure_iot_spi_wait_done(spi);
+        //Wait for the tx buffer to be empty after the sending of the data 
+        secure_iot_spi_wait_tx_data(spi);
+        secure_iot_spi_interrupt_enable(spi);
+        secure_iot_spi_tx(spi,tx_ptr++);
         if(rx_ptr){
-            secure_iot_spi_wait(spi,SECURE_IOT_SPI_WAIT_RX_FULL,spi->polling);
+            //secure_iot_spi_wait(spi,SECURE_IOT_SPI_WAIT_RX_FULL,spi->polling);
+            //secure_iot_spi_wait_done(spi); --> should find either tx/rx
+            //wait for any data to be present in rx for access.
+            secure_iot_spi_wait_rx_data(spi);
+            secure_iot_spi_interrupt_enable(spi);
             secure_iot_spi_rx(spi,rx_ptr++);
         }
         remaining_words--;
@@ -383,7 +451,9 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
     u32 cs_bits ,max_bits_per_word;
     struct spi_controller *host;
 
-    host= spi_alloc_host(&pdev->dev, sizeof(struct secure_iot_spi));
+    //host= spi_alloc_host(&pdev->dev, sizeof(struct secure_iot_spi));
+    // Instead of host = spi_alloc_host(...)
+    host = spi_alloc_master(&pdev->dev, sizeof(struct secure_iot_spi)); 
     if(!host){
         dev_err(&pdev->dev ," Out of memory \n");
         return -ENOMEM;
@@ -440,7 +510,7 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
     /*defining of the host for argument passing*/
     host->bus_num = pdev->id;
     host->num_chipselect = num_cs;
-    host->mode_bits = (SPI_CPHA&1) | (SPI_CPOL&1<<1) | (SPI_LSB_FIRST&(1<<3) ) | (SPI_CS_HIGH & (1<<2));
+    host->mode_bits = (SPI_CPHA&1) | (SPI_CPOL&(1<<1)) | (SPI_LSB_FIRST&(1<<3) ) | (SPI_CS_HIGH & (1<<2));
     /*Check what is the case of this implementation. */
     host->bits_per_word_mask = SPI_BPW_MASK(8);
     host->prepare_message = secure_iot_spi_prepare_message;
