@@ -100,7 +100,9 @@
 
 /*default changes for secure iot*/
 #define SECURE_IOT_SPI_WAIT_TX_IDLE     (1U<<0)  //Wait for tx fifo empty.
-#define SECURE_IOT_SPI_WAIT_RX_FULL     (1U << 1)  //wait for rx fifo full
+#define SECURE_IOT_SPI_WAIT_RX_FULL     (1U << 17)  //wait for rx fifo full
+#define SECURE_IOT_SPI_WAIT_TX_FULL    (1U<<8)  //Wait for tx fifo empty.
+#define SECURE_IOT_SPI_WAIT_RX_EMPTY     (1U << 9)  //wait for rx fifo full
 #define SECURE_IOT_SPI_WAIT_BUSY_CLR    (1U << 2)   //wait for busy =0
 
 struct secure_iot_spi{
@@ -340,16 +342,17 @@ static void secure_iot_spi_wait (struct secure_iot_spi *spi, u32 bit, int poll){
     else{
         /*interrupt based : enable interrupt and wait.*/
         u32 intr_en = readl(spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-        if(bit & SECURE_IOT_SPI_WAIT_TX_IDLE){
-            intr_en |= MINDGROVE_SPI_INTR_TX_FIFO_EMPTY;
+        if(bit & SECURE_IOT_SPI_WAIT_TX_FULL){
+            intr_en |= MINDGROVE_SPI_INTR_TX_FULL;
         }
 
-        if(bit & SECURE_IOT_SPI_WAIT_RX_FULL){
-            intr_en |= MINDGROVE_SPI_INTR_RX_FULL;
+        if(bit & SECURE_IOT_SPI_WAIT_RX_EMPTY){
+            intr_en |= MINDGROVE_SPI_INTR_RX_EMPTY;
         }
 
         /*Save the state if needed */
-        reinit_completion(&spi->done);
+        reinit_completion(&spi->done); 
+        //To see if the transaction is completed via done
         writel(intr_en, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
         wait_for_completion(&spi->done);
 
