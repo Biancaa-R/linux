@@ -142,6 +142,7 @@ static int secure_iot_spi_init(struct secure_iot_spi *spi){
 
 static int secure_iot_spi_interrupt_enable(struct secure_iot_spi *spi){
     writel(0xffffffff,spi->regs+MINDGROVE_SPI_REG_INTR_EN);
+    return 0;
 }
 static int secure_iot_spi_prepare_message(struct spi_controller *host, struct spi_message *msg)
 {
@@ -456,9 +457,9 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
     u32 cs_bits ,max_bits_per_word;
     struct spi_controller *host;
 
-    //host= spi_alloc_host(&pdev->dev, sizeof(struct secure_iot_spi));
+    host= spi_alloc_host(&pdev->dev, sizeof(struct secure_iot_spi));
     // Instead of host = spi_alloc_host(...)
-    host = spi_alloc_master(&pdev->dev, sizeof(struct secure_iot_spi)); 
+    //host = spi_alloc_master(&pdev->dev, sizeof(struct secure_iot_spi)); 
     if(!host){
         dev_err(&pdev->dev ," Out of memory \n");
         return -ENOMEM;
