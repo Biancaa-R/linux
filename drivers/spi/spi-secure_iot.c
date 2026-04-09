@@ -96,13 +96,15 @@
 #define MINDGROVE_SPI_INTR_TX_FULL             (1 << 8)
 #define MINDGROVE_SPI_INTR_RX_EMPTY            (1 << 9)
 #define MINDGROVE_SPI_INTR_RX_HALF             (1  << 13)
-#define MINDGROVE_SPI_INTR_RX_FULL             (1  << 18)
+#define MINDGROVE_SPI_INTR_RX_FULL             (1  << 17)
 
 /*default changes for secure iot*/
 #define SECURE_IOT_SPI_WAIT_TX_IDLE     (1U<<0)  //Wait for tx fifo empty.
 #define SECURE_IOT_SPI_WAIT_RX_FULL     (1U << 17)  //wait for rx fifo full
 #define SECURE_IOT_SPI_WAIT_TX_FULL    (1U<<8)  //Wait for tx fifo empty.
 #define SECURE_IOT_SPI_WAIT_RX_EMPTY     (1U << 9)  //wait for rx fifo full
+#define SECURE_IOT_SPI_WAIT_TX_HALF       (1U << 4)
+#define SECURE_IOT_SPI_WAIT_RX_HALF        (1U << 13)
 #define SECURE_IOT_SPI_WAIT_BUSY_CLR    (1U << 2)   //wait for busy =0
 
 struct secure_iot_spi{
