@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Mindgrove Platform-Level Interrupt Controller (PLIC) Driver
+ * 
+ * Author : Biancaa Ramesh <biancaa2210329@ssn.edu.in>
  *
  * Copyright (C) 2026 Mindgrove Technologies
  *

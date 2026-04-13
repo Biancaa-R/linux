@@ -50,6 +50,9 @@ struct platform_device * mindgrove_serial_ports[SECURE_IOT_MAX_UART];
 #define RX_NOT_EMPTY_SHIFT 2
 #define RX_NOT_EMPTY_MASK (1 << RX_NOT_EMPTY_SHIFT)
 #define RX_FULL_SHIFT 3
+#define RX_FULL_MASK (1<<RX_FULL_SHIFT)
+#define RX_ALMOST_FULL_SHIFT 8
+#define RX_ALMOST_FULL_MASK (1<<8)
 #define SECURE_IOT_RX_FIFO_DEPTH 32
 #define SERIAL_MAJOR TTY_MAJOR
 #define SERIAL_MINOR 64
@@ -60,6 +63,10 @@ struct platform_device * mindgrove_serial_ports[SECURE_IOT_MAX_UART];
 
 #define MINDGROVE_SERIAL_IE_TX_EMPTY (1 << 0)
 #define MINDGROVE_SERIAL_IE_RX_NOT_EMPTY (1 << 2)
+#define MINDGROVE_SERIAL_STOP_BIT_SHIFT 1
+#define MINDGROVE_SERIAL_STOP_BIT_MASK (3 << MINDGROVE_SERIAL_STOP_BIT_SHIFT)
+#define MINDGROVE_SERIAL_IE_TXWM_MASK (3<<0)
+#define MINDGROVE_SERIAL_IE_RXWM_MASK (67<<3)
 
 static void mindgrove_uart_putc(struct uart_port *port ,unsigned char c){
     while(__raw_readl(port->membase+STATUS_REG)&TX_DATA_FULL_MASK){
@@ -79,11 +86,26 @@ static char uart_getc(struct uart_port *port){
     return (char)(__raw_readl(port->membase+RX_REG));
 }
 
-static void mindgrove_uart_start_tx(struct uart_port *port){
+// static void mindgrove_uart_start_tx(struct uart_port *port){
+//     struct circ_buf *xmit = &port->state->xmit;
+//     while(!uart_circ_empty(xmit)){
+//         mindgrove_uart_putc(port,xmit->buf[xmit->tail]);
+//         xmit->tail = ((xmit->tail+1) &  (UART_XMIT_SIZE - 1));
+//         port->icount.tx++;
+//     }
+// }
+
+static void mindgrove_uart_start_tx(struct uart_port *port) {
+    struct secure_iot_serial_port *ssp = port_to_mindgrove_serial_port(port);
     struct circ_buf *xmit = &port->state->xmit;
-    while(!uart_circ_empty(xmit)){
-        mindgrove_uart_putc(port,xmit->buf[xmit->tail]);
-        xmit->tail = ((xmit->tail+1) &  (UART_XMIT_SIZE - 1));
+
+    while (!uart_circ_empty(xmit)) {
+        // Check if hardware is full. If it is, STOP and wait for the next IRQ.
+        if (readl(ssp->reg + STATUS_REG) & TX_DATA_FULL_MASK)
+            break;
+
+        writel(xmit->buf[xmit->tail], ssp->reg + TX_REG);
+        xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
         port->icount.tx++;
     }
 }
@@ -138,7 +160,7 @@ static void __mindgre_transmit_char(struct secure_iot_serial_port *ssp ,int ch)
     __mindgrove_writel(ch , TX_REG ,ssp);
 }
 
-static char __mindgrove_recieve_char(struct secure_iot_serial_port *ssp,char *is_empty){
+static char __mindgrove_receive_char(struct secure_iot_serial_port *ssp,char *is_empty){
     u32 status;
     u32 data_reg;
     u8 ch;
@@ -170,7 +192,7 @@ static void mindgrove_receive_chars(struct secure_iot_serial_port *ssp)
     u8 ch;
 
     for(c =SECURE_IOT_RX_FIFO_DEPTH; c>0; c--){
-        ch = mindgrove_receive_char(ssp, &is_empty);
+        ch = __mindgrove_receive_char(ssp, &is_empty);
         if(is_empty){
             break;
         }
@@ -181,6 +203,21 @@ static void mindgrove_receive_chars(struct secure_iot_serial_port *ssp)
     }
 
     tty_flip_buffer_push(&ssp->port.state->port);
+}
+
+static void mindgrove_serial_set_stop_bits(struct secure_iot_serial_port *ssp, char nstop)
+{
+	u16 ctrl_reg;
+
+	if (nstop < 1 || nstop > 2) {
+		WARN_ON(1);
+		return;
+	}
+
+	ctrl_reg = readl(ssp->reg+CTRL);
+	ctrl_reg &= ~MINDGROVE_SERIAL_STOP_BIT_MASK;
+	ctrl_reg |= (nstop - 1) << MINDGROVE_SERIAL_STOP_BIT_SHIFT;
+	writel(ctrl_reg,ssp->base+CTRL);
 }
 
 // static void mindgrove_update_div(struct secure_iot_serial_port *ssp)
@@ -200,7 +237,7 @@ static void __mindgrove_enable_txwm(struct secure_iot_serial_port *ssp)
     ssp->ier |= MINDGROVE_SERIAL_IE_TXWM_MASK;
     u32 intr_en_ctrl = readl(ssp->reg+INTR_EN);
     intr_en_ctrl |= ssp->ier;
-    writel(intr_en_ctrl ssp->reg+INTR_EN);
+    writel(intr_en_ctrl, ssp->reg+INTR_EN);
 }
 
 static void __mindgrove_enable_rxwm(struct secure_iot_serial_port *ssp)
@@ -211,7 +248,7 @@ static void __mindgrove_enable_rxwm(struct secure_iot_serial_port *ssp)
     ssp->ier |= MINDGROVE_SERIAL_IE_RXWM_MASK;
     u32 intr_en_ctrl = readl(ssp->reg+INTR_EN);
     intr_en_ctrl |= ssp->ier;
-    writel(intr_en_ctrl ssp->reg+INTR_EN);
+    writel(intr_en_ctrl, ssp->reg+INTR_EN);
 }
 
 static void __mindgrove_disable_txwm(struct secure_iot_serial_port *ssp)
@@ -222,7 +259,7 @@ static void __mindgrove_disable_txwm(struct secure_iot_serial_port *ssp)
     ssp->ier &= ~MINDGROVE_SERIAL_IE_TXWM_MASK;
     u32 intr_en_ctrl = readl(ssp->reg+INTR_EN);
     intr_en_ctrl &= ssp->ier;
-    writel(intr_en_ctrl ssp->reg+INTR_EN);    
+    writel(intr_en_ctrl, ssp->reg+INTR_EN);    
 }
 
 static void __mindgrove_disable_rxwm(struct secure_iot_serial_port * ssp)
@@ -233,7 +270,7 @@ static void __mindgrove_disable_rxwm(struct secure_iot_serial_port * ssp)
     ssp->ier &= ~MINDGROVE_SERIAL_IE_RXWM_MASK;
     u32 intr_en_ctrl = readl(ssp->reg+INTR_EN);
     intr_en_ctrl &= ssp->ier;
-    writel(intr_en_ctrl ssp->reg+INTR_EN);   
+    writel(intr_en_ctrl, ssp->reg+INTR_EN);   
 
 }
 
@@ -269,16 +306,17 @@ static void secure_stop_tx(struct uart_port *port)
 static void secure_serial_stop_rx(struct uart_port *port)
 {
     struct secure_iot_serial_port *ssp = port_to_mindgrove_serial_port(port);
+    __mindgrove_disable_rxwm(ssp);
     __mindgrove_enable_txwm(ssp);
 }
 
 static void secure_serial_start_rx(struct uart_port *port)
 {
     struct secure_iot_serial_port *ssp = port_to_mindgrove_serial_port(port);
-    __ssp_enable_txwm(ssp);
+    __mindgrove_enable_rxwm(ssp);
 }
 
-static void mindgrove_init_port(struct uart_port *mindgrove_port, struct platform_device *pdev){
+static void mindgrove_init_port(struct uart_port *mindgrove_port, struct platform_device *pdev, struct secure_iot_serial_port *ssp){
     //Initiallization of the port struct at the start of the nitialization code in the script.
     struct uart_port *port =&mindgrove_port->port;
     struct mindgrove_uart_data *data =pdev->dev.platform_data;
@@ -286,7 +324,8 @@ static void mindgrove_init_port(struct uart_port *mindgrove_port, struct platfor
     port->iotype = UPIO_MEM;
     port->iobase = pdev->resource[0]; //0x11300
     port->flags = UPF_BOOT_AUTOCONF;
-    port->ops = &mindgrove_ops;
+    //port->ops = &mindgrove_ops;
+    port->ops = &mindgrove_pops;
     port->fifosize = SECURE_IOT_RX_FIFO_DEPTH;
     port->line = pdev->id;
     port->dev = &pdev->dev;
@@ -306,11 +345,17 @@ static void mindgrove_init_port(struct uart_port *mindgrove_port, struct platfor
         port->membase =NULL;
     }
     // for the console the clk could already be set
-    if(!mindgrove_port->clk){
-        mindgrove_port->clk = clk_get(&pdev->dev,"usart");
-        clk_enable(mindgrove_port->clk);
-        port->uartclk = clk_get_rate(mindgrove_port->clk);
-        clk_disable(mindgrove_port->clk);
+    if(!ssp->clk){
+        // mindgrove_port->clk = clk_get(&pdev->dev,"usart");
+        // clk_enable(mindgrove_port->clk);
+        // port->uartclk = clk_get_rate(mindgrove_port->clk);
+        // clk_disable(mindgrove_port->clk);
+        if (!IS_ERR(ssp->clk)) {
+            clk_prepare_enable(ssp->clk);
+            port->uartclk = devm_clk_get_rate(ssp->clk);
+        } else {
+            port->uartclk = 16000000; // Fallback or handle error
+        }
     }
 }
 
@@ -341,6 +386,7 @@ static int mindgrove_serial_probe(struct platform_device *pdev)
     if (!ssp)
         return -ENOMEM;
 
+    mindgrove_init_port(ssp, pdev); // Use your helper!
     port = &ssp->port;
     res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
     port->mapbase = res->start;
@@ -422,20 +468,136 @@ static int mindgrove_serial_probe(struct platform_device *pdev)
 // 	return 0;
 // }
 
-static void mindgrove_serial_remove(struct platform_device *pdev)
+static void mindgrove_uart_stop_tx(struct uart_port *port)
 {
-    struct uart_port *port;
-    int i= pdev->id;
-    if(i==-1){
-        i=0;
-    }
-    port =&mindgrove_serial_ports[i];
-    //port->backup_imr =0;
-    //How I am to store the various instances of the uart struct.
-    uart_remove_one_port(&mindgrove_uart,port);
-    iounmap(port->membase);
+    struct secure_iot_serial_port *ssp = port_to_mindgrove_serial_port(port);
+    //disable tx interrupts mask
+    u16 interrupt_en = readl(ssp->reg + INTR_EN);
+    interrupt_en &= ~(TX_DATA_EMPTY_MASK);
+    interrupt_en &= ~(TX_DATA_FULL_MASK);
+    writel(interrupt_en , ssp->reg+INTR_EN);
 }
 
+static void mindgrove_uart_stop_rx(struct uart_port *port)
+{
+    struct secure_iot_serial_port *ssp =port_to_mindgrove_serial_port(port);
+    //disable rx interrupt masks
+    u16 interrupt_en = readl(ssp->reg+INTR_EN);
+    interrupt_en &= ~(RX_NOT_EMPTY_MASK);
+    interrupt_en &= ~(RX_FULL_MASK);
+    interrupt_en &= ~(RX_ALMOST_FULL_MASK);
+    writel(interrupt_en , ssp->reg+INTR_EN);
+}
+
+static int mindgrove_serial_startup(struct uart_port *port)
+{
+    struct secure_iot_serial_port *ssp =port_to_mindgrove_serial_port(port);
+    unsigned long flags;
+    // default functions 
+    uart_port_lock_irqsave(&ssp->port, &flags);
+    //enable all rx interrupts for reception.
+    u16 interrupt_en = readl(ssp->reg+INTR_EN);
+    interrupt_en |= (RX_NOT_EMPTY_MASK);
+    interrupt_en |= (RX_FULL_MASK);
+    interrupt_en |= (RX_ALMOST_FULL_MASK);
+    writel(interrupt_en , ssp->reg+INTR_EN);
+    uart_port_unlock_irqrestore(&ssp->port,flags);
+    return 0;
+
+}
+
+static void mindgrove_serial_shutdown(struct uart_port *port)
+{
+    struct secure_iot_serial_port *ssp = port_to_mindgrove_serial_port(port);
+    unsigned long flags;
+    uart_port_lock_irqsave(&ssp->port ,&flags);
+    //disable rx interrupts
+    u16 interrupt_en = readl(ssp->reg+INTR_EN);
+    interrupt_en &= ~(RX_NOT_EMPTY_MASK);
+    interrupt_en &= ~(RX_FULL_MASK);
+    interrupt_en &= ~(RX_ALMOST_FULL_MASK);
+    interrupt_en &= ~(TX_DATA_EMPTY_MASK);
+    interrupt_en &= ~(TX_DATA_FULL_MASK);
+    writel(interrupt_en , ssp->reg+INTR_EN);
+    uart_port_unlock_irqstore(&ssp->port,flags);
+}
+
+static void mindgrove_serial_set_termios(struct uart_port *port, struct ktermios* termios ,const struct ktermios *old)
+{
+    struct secure_iot_serial_port *ssp = port_to_mindgrove_serial_port(port);
+    unsigned long flags;
+    u32 v,old_v;
+    int rate;
+    char nstop;
+    
+    if((termios->c_cflag &CSIZE) != CS8)
+    {
+        dev_err_once(ssp->port.dev, "Only 8 bit words are supported \n");
+        termios->c_cflag &= ~CSIZE;
+        termios->c_cflag |= CS8;
+    }
+    if (termios->c_iflag &(INPCK | PARMRK))
+        dev_err_once(ssp->port.dev ,"parity checking not supported \n");
+    if (termios->c_iflag &BRKINT)
+        dev_err_once(ssp->port.dev,"Break detection not supported\n");
+    termios->c_iflag &= ~(INPCK|PARMRK|BRKINT);
+
+    //Setting the number of stop bits
+    nstop = (termios->c_cflag & CSTOPB) ? 2 : 1;
+    mindgrove_serial_set_stop_bits(ssp,nstop);
+    /*Setting of the line rate in drivers*/
+    rate = uart_get_baud_rate(port,termios,old,0,ssp->port.uartclk/16);
+    mindgrove_serial_update_baud_rate(ssp,rate);
+    uart_port_lock_irqsave(&ssp->port, &flags);
+
+    /*Update per port timeout*/
+    uart_update_timeout(port,termios->c_cflag,rate);
+    ssp->port.read_status_mask =0;
+
+    /*Ignore all characters if CREAD is not set*/
+    v = readl(ssp->reg + INTR_EN);
+    old_v =v;
+    if((termios->c_cflag & CREAD) ==0 )
+    {
+        v &= ~RX_NOT_EMPTY_MASK;
+        v &= ~RX_ALMOST_FULL_MASK;
+        v &= ~RX_FULL_MASK;
+    }
+    else{
+        v |= RX_NOT_EMPTY_MASK;
+        v |= RX_ALMOST_FULL_MASK;
+        v |= RX_FULL_MASK;
+    }
+    if(v!=old_v)
+        writel(v,ssp->reg+INTR_EN);
+    uart_port_unlock_irqstore(&ssp->port,flags);
+        
+}
+
+// For now I am using implementation for single serial core -> Future multiple serial simultaneously.
+// static void mindgrove_serial_remove(struct platform_device *pdev)
+// {
+//     struct uart_port *port;
+//     int i= pdev->id;
+//     if(i==-1){
+//         i=0;
+//     }
+//     port =&mindgrove_serial_ports[i];
+//     //port->backup_imr =0;
+//     //How I am to store the various instances of the uart struct.
+//     uart_remove_one_port(&mindgrove_uart,port);
+//     iounmap(port->membase);
+// }
+
+static void mindgrove_serial_remove(struct platform_device *pdev) {
+    struct secure_iot_serial_port *ssp = platform_get_drvdata(pdev);
+
+    if (ssp) {
+        uart_remove_one_port(&mindgrove_uart, &ssp->port);
+        if (!IS_ERR(ssp->clk))
+            clk_disable_unprepare(ssp->clk);
+    }
+}
 
 static unsigned int secure_get_mctrl(struct uart_port *port)
 {
@@ -542,7 +704,7 @@ OF_EARLYCON_DECLARE(mindgrove, "mindgrove,uart",early_mindgrove_serial_setup);
 #endif /*CONFIG_SERIAL_EARLYCON*/
 
 /* Linux console interface */
-#ifdef CONFIG_SERIAL_SIFIVE_CONSOLE
+#ifdef CONFIG_SERIAL_SECURE_IOT_CONSOLE
 static struct secure_iot_serial_port *mindgrove_serial_console_ports[MINDGROVE_SERIAL_MAX_PORTS];
 
 static void mindgrove_serial_console_putchar(struct uart_port *port, unsigned char ch)

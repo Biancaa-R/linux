@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (C) 2017 SiFive
- * Copyright (C) 2018 Christoph Hellwig
+ * Mindgrove Platform-Level Interrupt Controller (PLIC) Driver (Generic implementation for single,multicore chips)
+ * 
+ * Author : Biancaa Ramesh <biancaa2210329@ssn.edu.in>
+ *
+ * Copyright (C) 2026 Mindgrove Technologies
+ *
+ * Hardware register layout (offsets from PLIC base) of SecureIoT
+
  */
 #define pr_fmt(fmt) "riscv-plic: " fmt
 #include <linux/acpi.h>
@@ -21,17 +27,6 @@
 #include <linux/syscore_ops.h>
 #include <asm/smp.h>
 
-/*
- * This driver implements a version of the RISC-V PLIC with the actual layout
- * specified in chapter 8 of the SiFive U5 Coreplex Series Manual:
- *
- *     https://static.dev.sifive.com/U54-MC-RVCoreIP.pdf
- *     Gosh I am so angry on Kapil sir :/
- *
- * The largest number supported by devices marked as 'sifive,plic-1.0.0', is
- * 1024, of which device 0 is defined as non-existent by the RISC-V Privileged
- * Spec.
- */
 
 #define MAX_DEVICES			1024
 #define MAX_CONTEXTS			15872
