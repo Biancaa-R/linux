@@ -1877,7 +1877,7 @@ static struct tty_struct *tty_open_current_tty(dev_t device, struct file *filp)
 		return ERR_PTR(-ENXIO);
 
 	filp->f_flags |= O_NONBLOCK; /* Don't let /dev/tty block */
-	/* noctty = 1; */
+	/*noctty = 0;*/
 	tty_lock(tty);
 	tty_kref_put(tty);	/* safe to drop the kref now */
 
@@ -2160,13 +2160,22 @@ retry_open:
 	}
 	clear_bit(TTY_HUPPED, &tty->flags);
 
+	// noctty = (filp->f_flags & O_NOCTTY) ||
+	// 	 (IS_ENABLED(CONFIG_VT) && device == MKDEV(TTY_MAJOR, 0)) ||
+	// 	 device == MKDEV(TTYAUX_MAJOR, 1) ||
+	// 	 (tty->driver->type == TTY_DRIVER_TYPE_PTY &&
+	// 	  tty->driver->subtype == PTY_TYPE_MASTER);
+	// if (!noctty)
+	// 	tty_open_proc_set_tty(filp, tty);
+
 	noctty = (filp->f_flags & O_NOCTTY) ||
-		 (IS_ENABLED(CONFIG_VT) && device == MKDEV(TTY_MAJOR, 0)) ||
-		 device == MKDEV(TTYAUX_MAJOR, 1) ||
-		 (tty->driver->type == TTY_DRIVER_TYPE_PTY &&
-		  tty->driver->subtype == PTY_TYPE_MASTER);
+     (tty->driver->type == TTY_DRIVER_TYPE_PTY &&
+      tty->driver->subtype == PTY_TYPE_MASTER);
+	//You know what I am done with this sh..
+	noctty =0;
 	if (!noctty)
 		tty_open_proc_set_tty(filp, tty);
+
 	tty_unlock(tty);
 	return 0;
 }

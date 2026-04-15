@@ -24,6 +24,8 @@ struct secure_iot_serial_port{
 };
 
 #define SECURE_IOT_MAX_UART 4
+#define MINDGROVE_CONSOLE_DEVICE NULL
+#define PORT_SECURE_IOT_V0 123
 
 struct platform_device * mindgrove_serial_ports[SECURE_IOT_MAX_UART];
 
@@ -67,6 +69,11 @@ struct platform_device * mindgrove_serial_ports[SECURE_IOT_MAX_UART];
 #define MINDGROVE_SERIAL_STOP_BIT_MASK (3 << MINDGROVE_SERIAL_STOP_BIT_SHIFT)
 #define MINDGROVE_SERIAL_IE_TXWM_MASK (3<<0)
 #define MINDGROVE_SERIAL_IE_RXWM_MASK (67<<3)
+
+/* Defined at the top to avoid 'undeclared' errors */
+static struct uart_driver mindgrove_uart;
+static struct platform_driver mindgrove_serial_driver;
+static const struct uart_ops mindgrove_pops;
 
 static void mindgrove_uart_putc(struct uart_port *port ,unsigned char c){
     while(__raw_readl(port->membase+STATUS_REG)&TX_DATA_FULL_MASK){
@@ -217,7 +224,7 @@ static void mindgrove_serial_set_stop_bits(struct secure_iot_serial_port *ssp, c
 	ctrl_reg = readl(ssp->reg+CTRL);
 	ctrl_reg &= ~MINDGROVE_SERIAL_STOP_BIT_MASK;
 	ctrl_reg |= (nstop - 1) << MINDGROVE_SERIAL_STOP_BIT_SHIFT;
-	writel(ctrl_reg,ssp->base+CTRL);
+	writel(ctrl_reg,ssp->reg+CTRL);
 }
 
 // static void mindgrove_update_div(struct secure_iot_serial_port *ssp)
@@ -316,6 +323,18 @@ static void secure_serial_start_rx(struct uart_port *port)
     __mindgrove_enable_rxwm(ssp);
 }
 
+static struct platform_driver mindgrove_serial_driver = {
+    .probe = mindgrove_serial_probe,
+    .remove = mindgrove_serial_remove,
+    .suspend = mindgrove_serial_suspend,
+    .resume = mindgrove_serial_resume,
+    .driver = {
+        .name = "mindgrove_uart",
+        .owner = THIS_MODULE,
+        .of_match_table = mindgrove_serial_of_match,
+    },
+};
+
 static void mindgrove_init_port(struct uart_port *mindgrove_port, struct platform_device *pdev, struct secure_iot_serial_port *ssp){
     //Initiallization of the port struct at the start of the nitialization code in the script.
     struct uart_port *port =&mindgrove_port->port;
@@ -332,10 +351,10 @@ static void mindgrove_init_port(struct uart_port *mindgrove_port, struct platfor
     port->mapbase =pdev->resource[0].start;
     port->membase=NULL;
     //initializing the ring buffer to 0 values at the start.
-    memset(&mindgrove_port->rx_ring, 0, sizeof(mindgrove_port->rx_ring));
+    //memset(&mindgrove_port->rx_ring, 0, sizeof(mindgrove_port->rx_ring));
 
     port->irq =pdev->resource[1].start;
-    tasklet_init(&mindgrove_port->tasklet,mindgrove_task_func,(unsigned long)port);
+    //tasklet_init(&mindgrove_port->tasklet,mindgrove_task_func,(unsigned long)port);
 
     if(data->regs){
         port->membase = data->regs;
@@ -352,7 +371,7 @@ static void mindgrove_init_port(struct uart_port *mindgrove_port, struct platfor
         // clk_disable(mindgrove_port->clk);
         if (!IS_ERR(ssp->clk)) {
             clk_prepare_enable(ssp->clk);
-            port->uartclk = devm_clk_get_rate(ssp->clk);
+            port->uartclk = clk_get_rate(ssp->clk);
         } else {
             port->uartclk = 16000000; // Fallback or handle error
         }
@@ -386,8 +405,8 @@ static int mindgrove_serial_probe(struct platform_device *pdev)
     if (!ssp)
         return -ENOMEM;
 
-    mindgrove_init_port(ssp, pdev); // Use your helper!
     port = &ssp->port;
+    mindgrove_init_port(port,pdev,ssp); // Use your helper!
     res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
     port->mapbase = res->start;
     port->membase = devm_ioremap_resource(&pdev->dev, res);
@@ -399,6 +418,7 @@ static int mindgrove_serial_probe(struct platform_device *pdev)
     port->dev = &pdev->dev;
     port->type = PORT_SECURE_IOT_V0;
     port->flags= UPF_BOOT_AUTOCONF;
+    port->line     = pdev->id >= 0 ? pdev->id : 0;
     port->ops = &mindgrove_pops; // Use your ops struct
     port->fifosize = 16; // Adjust based on your HW specs
 
@@ -519,7 +539,7 @@ static void mindgrove_serial_shutdown(struct uart_port *port)
     interrupt_en &= ~(TX_DATA_EMPTY_MASK);
     interrupt_en &= ~(TX_DATA_FULL_MASK);
     writel(interrupt_en , ssp->reg+INTR_EN);
-    uart_port_unlock_irqstore(&ssp->port,flags);
+    uart_port_unlock_irqrestore(&ssp->port,flags);
 }
 
 static void mindgrove_serial_set_termios(struct uart_port *port, struct ktermios* termios ,const struct ktermios *old)
@@ -570,7 +590,7 @@ static void mindgrove_serial_set_termios(struct uart_port *port, struct ktermios
     }
     if(v!=old_v)
         writel(v,ssp->reg+INTR_EN);
-    uart_port_unlock_irqstore(&ssp->port,flags);
+    uart_port_unlock_irqrestore(&ssp->port,flags);
         
 }
 
@@ -705,7 +725,7 @@ OF_EARLYCON_DECLARE(mindgrove, "mindgrove,uart",early_mindgrove_serial_setup);
 
 /* Linux console interface */
 #ifdef CONFIG_SERIAL_SECURE_IOT_CONSOLE
-static struct secure_iot_serial_port *mindgrove_serial_console_ports[MINDGROVE_SERIAL_MAX_PORTS];
+static struct secure_iot_serial_port *mindgrove_serial_console_ports[SECURE_IOT_MAX_UART];
 
 static void mindgrove_serial_console_putchar(struct uart_port *port, unsigned char ch)
 {
@@ -815,7 +835,8 @@ static struct uart_driver mindgrove_uart = {
 
 
 static int __init mindgrove_serial_init(void){
-    uart_register_driver(&mindgrove_serial);
+    uart_register_driver(&mindgrove_uart);
+    //Should be the name of the uart driver struct.
     //for registering the struct specific to serial datatype.
     platform_driver_register(&mindgrove_serial_driver);
     return 0;
@@ -823,7 +844,7 @@ static int __init mindgrove_serial_init(void){
 
 static void __exit mindgrove_serial_exit(void){
     platform_driver_unregister(&mindgrove_serial_driver);
-    uart_unregister_driver(&mindgrove_serial);
+    uart_unregister_driver(&mindgrove_uart);
 }
 
 module_init(mindgrove_serial_init);
@@ -856,17 +877,6 @@ static const struct of_device_id mindgrove_serial_of_match[] = {
 
 MODULE_DEVICE_TABLE(of,mindgrove_serial_of_match);
 
-static struct platform_driver mindgrove_serial_driver = {
-    .probe = mindgrove_serial_probe,
-    .remove = mindgrove_serial_remove,
-    .suspend = mindgrove_serial_suspend,
-    .resume = mindgrove_serial_resume,
-    .driver = {
-        .name = "mindgrove_uart",
-        .owner = THIS_MODULE,
-        .of_match_table = mindgrove_serial_of_match,
-    },
-};
 
 //FOR selecting the output console device -> to display the output.
 MODULE_DESCRIPTION("Mindgrove Secure_IoT serial drivers");
