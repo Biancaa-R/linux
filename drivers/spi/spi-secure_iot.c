@@ -380,7 +380,7 @@ static int secure_iot_spi_wait_tx_data(struct secure_iot_spi *spi)
      * Check every 1us, timeout after 100ms (100,000us).
      */
     return readl_poll_timeout_atomic(spi->regs + MINDGROVE_SPI_REG_FIFO_STATUS, 
-                                     status, (status & MINDGROVE_SPI_FIFO_STATUS_TX_FULL), 
+                                     status, !(status & MINDGROVE_SPI_FIFO_STATUS_TX_FULL), 
                                      1, 100000);
 }
 
@@ -425,15 +425,23 @@ static int secure_iot_spi_transfer_one(struct spi_controller *host, struct spi_d
         //secure_iot_spi_wait(spi, SECURE_IOT_SPI_WAIT_TX_IDLE, spi->polling);
         //secure_iot_spi_wait_done(spi);
         //Wait for the tx buffer to be empty after the sending of the data 
-        secure_iot_spi_wait_tx_data(spi);
         secure_iot_spi_interrupt_enable(spi);
+        int ret = secure_iot_spi_wait_tx_data(spi);
+        if (ret) {
+                dev_err(spi->dev, "TX timeout\n");
+                return ret;
+        }
         secure_iot_spi_tx(spi,tx_ptr++);
         if(rx_ptr){
             //secure_iot_spi_wait(spi,SECURE_IOT_SPI_WAIT_RX_FULL,spi->polling);
             //secure_iot_spi_wait_done(spi); --> should find either tx/rx
             //wait for any data to be present in rx for access.
-            secure_iot_spi_wait_rx_data(spi);
             secure_iot_spi_interrupt_enable(spi);
+            ret = secure_iot_spi_wait_rx_data(spi);
+            if (ret) {
+                dev_err(spi->dev, "RX timeout\n");
+                return ret;
+            }
             secure_iot_spi_rx(spi,rx_ptr++);
         }
         remaining_words--;
@@ -465,6 +473,11 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
         return -ENOMEM;
     }
     spi =spi_controller_get_devdata(host);
+
+    init_completion(&spi->done);
+    init_completion(&spi->tx_done);   // ADD THIS
+    init_completion(&spi->rx_done);   // ADD THIS
+
     spi->dev = &pdev->dev;
     init_completion(&spi->done);
     platform_set_drvdata(pdev,host);
@@ -541,10 +554,6 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
         dev_err(&pdev->dev ,"Spi register host failed to happen !\n");
         goto disable_clk;
     }
-
-    init_completion(&spi->done);
-    init_completion(&spi->tx_done);   // ADD THIS
-    init_completion(&spi->rx_done);   // ADD THIS
 
     return 0;
 
