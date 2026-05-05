@@ -486,6 +486,7 @@ static int sd_set_bus_speed_mode(struct mmc_card *card, u8 *status)
 {
 	int err;
 	unsigned int timing = 0;
+	printf("Selection of the bus speed in the linux kernel system \n");
 
 	switch (card->sd_bus_speed) {
 	case UHS_SDR104_BUS_SPEED:
@@ -1623,7 +1624,8 @@ static int mmc_sd_alive(struct mmc_host *host)
 static void mmc_sd_detect(struct mmc_host *host)
 {
 	int err;
-
+	printf("SD card detect call back call from the system \n");
+	printf("Inside sd,c function\n");
 	mmc_get_card(host->card, NULL);
 
 	/*
@@ -1739,7 +1741,9 @@ out:
  * Host is being removed. Free up the current card and do a graceful power-off.
  */
 static void mmc_sd_remove(struct mmc_host *host)
-{
+{ 
+	printf("SD card remove call back call from the system \n");
+	printf("Inside sd,c function\n");
 	get_device(&host->card->dev);
 	mmc_remove_card(host->card);
 
@@ -1754,6 +1758,8 @@ static void mmc_sd_remove(struct mmc_host *host)
 static int mmc_sd_suspend(struct mmc_host *host)
 {
 	int err;
+	printf("SD card suspend call back call from the system \n");
+	printf("Inside sd,c function\n");
 
 	err = _mmc_sd_suspend(host);
 	if (!err) {
@@ -1771,6 +1777,8 @@ static int mmc_sd_suspend(struct mmc_host *host)
 static int _mmc_sd_resume(struct mmc_host *host)
 {
 	int err = 0;
+	printf("SD card resume call back call from the system \n");
+	printf("Inside sd,c function\n");
 
 	mmc_claim_host(host);
 
@@ -1852,7 +1860,9 @@ static const struct mmc_bus_ops mmc_sd_ops = {
  * Starting point for SD card init.
  */
 int mmc_attach_sd(struct mmc_host *host)
-{
+{ 
+	printf("SD card attach to host in init call back call from the system \n");
+	printf("Inside sd,c function\n");
 	int err;
 	u32 ocr, rocr;
 
@@ -1906,6 +1916,7 @@ int mmc_attach_sd(struct mmc_host *host)
 		goto remove_card;
 
 	mmc_claim_host(host);
+	printf("SD card init sequence successful \n");
 	return 0;
 
 remove_card:

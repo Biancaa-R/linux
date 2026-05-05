@@ -1149,6 +1149,9 @@ static int mmc_spi_probe(struct spi_device *spi)
 	int			status;
 	bool			has_ro = false;
 
+	// Debug print inside mmc probe function
+	printf("Inside the MMC SPI probe function in secureIoT :/");
+
 	/* We rely on full duplex transfers, mostly to reduce
 	 * per-transfer overheads (by making fewer transfers).
 	 */
@@ -1269,6 +1272,7 @@ static int mmc_spi_probe(struct spi_device *spi)
 	 * Index 0 is card detect
 	 * Old boardfiles were specifying 1 ms as debounce
 	 */
+	printf("Inside the MMC SPI probe function in secureIoT before request CD :/\n");
 	status = mmc_gpiod_request_cd(mmc, NULL, 0, false, 1000);
 	if (status == -EPROBE_DEFER)
 		goto fail_gpiod_request;
@@ -1282,6 +1286,7 @@ static int mmc_spi_probe(struct spi_device *spi)
 		mmc_gpiod_request_cd_irq(mmc);
 	}
 	mmc_detect_change(mmc, 0);
+	printf("Inside the MMC SPI probe function in secureIoT after the MMC detect change of card:/\n");
 
 	/* Index 1 is write protect/read only */
 	status = mmc_gpiod_request_ro(mmc, NULL, 1, 0);
@@ -1289,6 +1294,8 @@ static int mmc_spi_probe(struct spi_device *spi)
 		goto fail_gpiod_request;
 	if (!status)
 		has_ro = true;
+	
+	printf("Inside the MMC SPI probe function in secureIoT just before dev info function  :/\n");
 
 	dev_info(&spi->dev, "SD/MMC host %s%s%s%s\n",
 			dev_name(&mmc->class_dev),
@@ -1297,6 +1304,7 @@ static int mmc_spi_probe(struct spi_device *spi)
 				? "" : ", no poweroff",
 			(mmc->caps & MMC_CAP_NEEDS_POLL)
 				? ", cd polling" : "");
+	printf("Inside the MMC SPI probe function in secureIoT before the final return :/\n");
 	return 0;
 
 fail_gpiod_request:

@@ -228,6 +228,7 @@ static void mmc_blk_kref_release(struct kref *ref)
 static void mmc_blk_put(struct mmc_blk_data *md)
 {
 	kref_put(&md->kref, mmc_blk_kref_release);
+	printf("MMC blk put function in block.c file\n");
 }
 
 static ssize_t power_ro_lock_show(struct device *dev,
@@ -373,6 +374,7 @@ static int mmc_blk_open(struct gendisk *disk, blk_mode_t mode)
 {
 	struct mmc_blk_data *md = mmc_blk_get(disk);
 	int ret = -ENXIO;
+	printf("MMC blk open function in block.c file \n");
 
 	mutex_lock(&block_mutex);
 	if (md) {
