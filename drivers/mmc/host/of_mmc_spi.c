@@ -36,7 +36,7 @@ static int of_mmc_spi_init(struct device *dev,
 			   irqreturn_t (*irqhandler)(int, void *), void *mmc)
 {
 	struct of_mmc_spi *oms = to_of_mmc_spi(dev);
-	printf("Inside the mmc spi init function in OF mmc spi dts binding\n");
+	printk(KERN_INFO,"Inside the mmc spi init function in OF mmc spi dts binding\n");
 
 	return request_threaded_irq(oms->detect_irq, NULL, irqhandler,
 					IRQF_ONESHOT, dev_name(dev), mmc);

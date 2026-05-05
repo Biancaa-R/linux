@@ -170,7 +170,7 @@ static void __mindgre_transmit_char(struct secure_iot_serial_port *ssp ,int ch)
 static char __mindgrove_receive_char(struct secure_iot_serial_port *ssp,char *is_empty){
     u32 status;
     u32 data_reg;
-    u8 ch;
+    u8 ch=0;
     // v = __mindgrove_readl(ssp,RX_REG);
     // if (! is_empty)
     //     WARN_ON(1);
@@ -265,7 +265,7 @@ static void __mindgrove_disable_txwm(struct secure_iot_serial_port *ssp)
     }
     ssp->ier &= ~MINDGROVE_SERIAL_IE_TXWM_MASK;
     u32 intr_en_ctrl = readl(ssp->reg+INTR_EN);
-    intr_en_ctrl &= ssp->ier;
+    intr_en_ctrl &= ssp->ier; //already cleared and 
     writel(intr_en_ctrl, ssp->reg+INTR_EN);    
 }
 

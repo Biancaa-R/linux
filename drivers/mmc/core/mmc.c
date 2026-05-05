@@ -2385,7 +2385,7 @@ static const struct mmc_bus_ops mmc_ops = {
  */
 int mmc_attach_mmc(struct mmc_host *host)
 { 
-	printf("Attaching mmc drivers start of mmc .c file function\n");
+	printk(KERN_INFO,"Attaching mmc drivers start of mmc .c file function\n");
 	int err;
 	u32 ocr, rocr;
 
