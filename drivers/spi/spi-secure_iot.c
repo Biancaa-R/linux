@@ -41,6 +41,7 @@
 
 /* CTRL register bit definitions */
 #define MINDGROVE_SPI_CTRL_SLAVE_MODE(x) ((x) << 0)
+#define MINDGROVE_SPI_CTRL_MISO_MODE(x)((x) << 24)
 #define MINDGROVE_SPI_CTRL_EN(x) ((x) << 1)
 #define MINDGROVE_SPI_CTRL_LSBFIRST(x) ((x) << 2)
 #define MINDGROVE_SPI_CTRL_RX_FLUSH(x) ((x) << 3)
@@ -129,6 +130,12 @@ static int secure_iot_spi_init(struct secure_iot_spi *spi){
 	/* Flush RX FIFO */
 	writel(MINDGROVE_SPI_CTRL_RX_FLUSH(1), spi->regs + MINDGROVE_SPI_REG_CTRL);
 	writel(MINDGROVE_SPI_CTRL_RX_FLUSH(0), spi->regs + MINDGROVE_SPI_REG_CTRL);
+    __u32 regs_out = readl(spi->regs+MINDGROVE_SPI_REG_CTRL);
+    regs_out |= (MINDGROVE_SPI_CTRL_SCLK_OUTEN | MINDGROVE_SPI_CTRL_NCS_OUTEN | MINDGROVE_SPI_CTRL_MOSI_OUTEN );
+    regs_out &= ~(MINDGROVE_SPI_CTRL_MISO_MODE(1));
+    regs_out &= ~(MINDGROVE_SPI_CTRL_SLAVE_MODE(1));
+    writel(regs_out, spi->regs + MINDGROVE_SPI_REG_CTRL);
+
 
 	/* Set default setup and hold times */
 	writel((1 << MINDGROVE_SPI_CLK_CTRL_SETUP_SHIFT) |
@@ -136,7 +143,9 @@ static int secure_iot_spi_init(struct secure_iot_spi *spi){
 		   spi->regs + MINDGROVE_SPI_REG_CLK_CTRL);
 
 	/* Configure NCS for software control */
-	writeb(MINDGROVE_SPI_NCS_CTRL_SELECT(1), spi->regs + MINDGROVE_SPI_REG_NCS_CTRL);
+	//writeb(MINDGROVE_SPI_NCS_CTRL_SELECT(1), spi->regs + MINDGROVE_SPI_REG_NCS_CTRL);
+    /* Software CS, deasserted (NCS high = idle) */
+    writeb(MINDGROVE_SPI_NCS_CTRL_SELECT(1) | MINDGROVE_SPI_NCS_SW(1), spi->regs + MINDGROVE_SPI_REG_NCS_CTRL);
     return 0;
 }
 
@@ -527,9 +536,13 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
 
 
     /*defining of the host for argument passing*/
-    host->bus_num = pdev->id;
+    //host->bus_num = pdev->id;
+    host->bus_num = of_alias_get_id(pdev->dev.of_node, "spi");
+    if (host->bus_num < 0)
+        host->bus_num = -1;  /* let kernel auto-assign if no alias */
     host->num_chipselect = num_cs;
-    host->mode_bits = (SPI_CPHA&1) | (SPI_CPOL&(1<<1)) | (SPI_LSB_FIRST&(1<<3) ) | (SPI_CS_HIGH & (1<<2));
+    //host->mode_bits = (SPI_CPHA&1) | (SPI_CPOL&(1<<1)) | (SPI_LSB_FIRST&(1<<3) ) | (SPI_CS_HIGH & (1<<2));
+    host->mode_bits = SPI_CPHA | SPI_CPOL | SPI_LSB_FIRST | SPI_CS_HIGH;
     /*Check what is the case of this implementation. */
     host->bits_per_word_mask = SPI_BPW_MASK(8);
     host->prepare_message = secure_iot_spi_prepare_message;

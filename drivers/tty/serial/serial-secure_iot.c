@@ -21,6 +21,7 @@ struct secure_iot_serial_port{
     unsigned long baud_rate;
     struct clk *clk;
     void __iomem *reg;
+    unsigned char console_line_ended;
 };
 
 #define SECURE_IOT_MAX_UART 4
@@ -162,7 +163,7 @@ static int mindgrove_serial_is_txfifo_empty(struct secure_iot_serial_port *ssp)
     return __mindgrove_readl(ssp,STATUS_REG) & TX_DATA_EMPTY_MASK;
 }
 
-static void __mindgre_transmit_char(struct secure_iot_serial_port *ssp ,int ch)
+static void __mindgrove_transmit_char(struct secure_iot_serial_port *ssp ,int ch)
 {
     __mindgrove_writel(ch , TX_REG ,ssp);
 }
@@ -221,10 +222,11 @@ static void mindgrove_serial_set_stop_bits(struct secure_iot_serial_port *ssp, c
 		return;
 	}
 
-	ctrl_reg = readl(ssp->reg+CTRL);
+	ctrl_reg = readw(ssp->reg+CTRL);
+    //AS it is a 16 bit register in this case.
 	ctrl_reg &= ~MINDGROVE_SERIAL_STOP_BIT_MASK;
 	ctrl_reg |= (nstop - 1) << MINDGROVE_SERIAL_STOP_BIT_SHIFT;
-	writel(ctrl_reg,ssp->reg+CTRL);
+	writew(ctrl_reg,ssp->reg+CTRL);
 }
 
 // static void mindgrove_update_div(struct secure_iot_serial_port *ssp)
@@ -492,21 +494,23 @@ static void mindgrove_uart_stop_tx(struct uart_port *port)
 {
     struct secure_iot_serial_port *ssp = port_to_mindgrove_serial_port(port);
     //disable tx interrupts mask
-    u16 interrupt_en = readl(ssp->reg + INTR_EN);
+    // 16 bit interrupt enable register is considered.
+    u16 interrupt_en = readw(ssp->reg + INTR_EN);
     interrupt_en &= ~(TX_DATA_EMPTY_MASK);
     interrupt_en &= ~(TX_DATA_FULL_MASK);
-    writel(interrupt_en , ssp->reg+INTR_EN);
+    writew(interrupt_en , ssp->reg+INTR_EN);
 }
 
 static void mindgrove_uart_stop_rx(struct uart_port *port)
 {
     struct secure_iot_serial_port *ssp =port_to_mindgrove_serial_port(port);
     //disable rx interrupt masks
-    u16 interrupt_en = readl(ssp->reg+INTR_EN);
+    // 16 bit interrupt enable register is considered.
+    u16 interrupt_en = readw(ssp->reg+INTR_EN);
     interrupt_en &= ~(RX_NOT_EMPTY_MASK);
     interrupt_en &= ~(RX_FULL_MASK);
     interrupt_en &= ~(RX_ALMOST_FULL_MASK);
-    writel(interrupt_en , ssp->reg+INTR_EN);
+    writew(interrupt_en , ssp->reg+INTR_EN);
 }
 
 static int mindgrove_serial_startup(struct uart_port *port)
@@ -567,7 +571,7 @@ static void mindgrove_serial_set_termios(struct uart_port *port, struct ktermios
     mindgrove_serial_set_stop_bits(ssp,nstop);
     /*Setting of the line rate in drivers*/
     rate = uart_get_baud_rate(port,termios,old,0,ssp->port.uartclk/16);
-    mindgrove_serial_update_baud_rate(ssp,rate);
+    mindgrove_update_baud_rate(ssp,rate);
     uart_port_lock_irqsave(&ssp->port, &flags);
 
     /*Update per port timeout*/
@@ -641,7 +645,9 @@ static void secure_break_ctl(struct uart_port*port ,int break_state)
 
 static unsigned int secure_tx_empty(struct uart_port *port)
 {
-    return TIOCSER_TEMP;
+    //return TIOCSER_TEMT;
+    struct secure_iot_serial_port *ssp = port_to_mindgrove_serial_port(port);
+    return mindgrove_serial_is_txfifo_empty(ssp) ? TIOCSER_TEMT:0;
 }
 
 /* Implementation of some useless functions .*/
@@ -676,7 +682,7 @@ static int mindgrove_serial_poll_get_char(struct uart_port *port)
 {
     struct secure_iot_serial_port *ssp = port_to_mindgrove_serial_port(port);
     char is_empty,ch;
-    ch = __mindgrove_recieve_char(ssp, &is_empty);
+    ch = __mindgrove_receive_char(ssp, &is_empty);
     if(is_empty){
         return NO_POLL_CHAR;
     }
@@ -686,8 +692,8 @@ static int mindgrove_serial_poll_get_char(struct uart_port *port)
 static void mindgrove_serial_poll_put_char(struct uart_port *port, unsigned char c)
 {
     struct secure_iot_serial_port *ssp = port_to_mindgrove_serial_port(port);
-    __ssp_wait_for_xmitr(ssp);
-    __ssp_transmit_char(ssp,c);
+    secure_wait_for_xmitr(ssp);
+    __mindgrove_transmit_char(ssp,c);
 }
 #endif /*CONFIG_CONSOLE_POLL*/
 
@@ -729,7 +735,7 @@ static struct secure_iot_serial_port *mindgrove_serial_console_ports[SECURE_IOT_
 
 static void mindgrove_serial_console_putchar(struct uart_port *port, unsigned char ch)
 {
-    struct secure_iot_serial_port *ssp = port_to_sifive_serial_port(port);
+    struct secure_iot_serial_port *ssp = port_to_mindgrove_serial_port(port);
     __secure_wait_for_xmitr(ssp);
     __secure_transmit_char(ssp,ch);
     ssp->console_line_ended = (ch == '\n');
@@ -785,7 +791,6 @@ static void mindgrove_serial_console_write_thread(struct console *con , struct n
 
     if(nbcon_exit_unsafe(wctxt)){
         int len = READ_ONCE(wxtxt->len);
-        int i;
 
         for(int i=0;i<len;i++)
         {
