@@ -572,6 +572,15 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
         dev_err(&pdev->dev ,"Spi register host failed to happen !\n");
         goto disable_clk;
     }
+    dev_info(&pdev->dev, "registered as spi%d, scanning children\n",
+         host->bus_num);
+
+    struct device_node *child;
+    for_each_child_of_node(pdev->dev.of_node, child) {
+        dev_info(&pdev->dev, "  child node: %pOF compatible=%s\n",
+             child,
+             of_get_property(child, "compatible", NULL) ?: "none");
+    }
 
     return 0;
 
