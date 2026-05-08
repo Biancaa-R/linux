@@ -537,9 +537,14 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
 
     /*defining of the host for argument passing*/
     //host->bus_num = pdev->id;
-    host->bus_num = of_alias_get_id(pdev->dev.of_node, "spi");
-    if (host->bus_num < 0)
-        host->bus_num = -1;  /* let kernel auto-assign if no alias */
+    // host->bus_num = of_alias_get_id(pdev->dev.of_node, "spi");
+    // if (host->bus_num < 0)
+    //     host->bus_num = -1;  /* let kernel auto-assign if no alias */
+    u32 bus_num;
+    if (of_property_read_u32(pdev->dev.of_node, "mindgrove,bus-num", &bus_num))
+        host->bus_num = -1;  /* auto-assign */
+    else
+        host->bus_num = bus_num;
     host->num_chipselect = num_cs;
     //host->mode_bits = (SPI_CPHA&1) | (SPI_CPOL&(1<<1)) | (SPI_LSB_FIRST&(1<<3) ) | (SPI_CS_HIGH & (1<<2));
     host->mode_bits = SPI_CPHA | SPI_CPOL | SPI_LSB_FIRST | SPI_CS_HIGH;
