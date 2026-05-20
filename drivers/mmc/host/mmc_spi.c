@@ -1285,6 +1285,12 @@ static int mmc_spi_probe(struct spi_device *spi)
 		mmc->caps &= ~MMC_CAP_NEEDS_POLL;
 		mmc_gpiod_request_cd_irq(mmc);
 	}
+	else {
+    /* No CD GPIO available — check for broken-cd in DT,
+     * fall back to polling so the card gets detected */
+    if (of_property_read_bool(spi->dev.of_node, "broken-cd"))
+        mmc->caps |= MMC_CAP_NEEDS_POLL;
+	}
 	mmc_detect_change(mmc, 0);
 	printk(KERN_INFO,"Inside the MMC SPI probe function in secureIoT after the MMC detect change of card:/\n");
 
