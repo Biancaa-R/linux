@@ -540,7 +540,7 @@ static int secure_iot_spi_probe(struct platform_device *pdev){
     // host->bus_num = of_alias_get_id(pdev->dev.of_node, "spi");
     // if (host->bus_num < 0)
     //     host->bus_num = -1;  /* let kernel auto-assign if no alias */
-    u32 bus_num;
+    u32 bus_num=0;
     if (of_property_read_u32(pdev->dev.of_node, "mindgrove,bus-num", &bus_num))
         host->bus_num = -1;  /* auto-assign */
     else
