@@ -1,661 +1,671 @@
-#include <linux/clk.h>
-#include <linux/module.h>
-#include <linux/interrupt.h>
-#include <linux/of.h>
-#include <linux/platform_device.h>
-#include <linux/spi/spi.h>
-#include <linux/io.h>
-#include <linux/log2.h>
-#include <linux/wait.h>
-#include <linux/completion.h>
-#include <linux/err.h>
-#include <linux/errno.h>
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Mindgrove SPI controller Linux driver
+ *
+ * Copyright (C) 2025 Mindgrove Technologies Private Limited
+ *
+ * KEY HARDWARE CONSTRAINT (discovered via oscilloscope):
+ *
+ *   NCS_OUTEN (CTRL bit 23) must be SET for the SW bit in NCS_CTRL to
+ *   physically drive the NCS/CS pin.  When CTRL = 0 (engine disabled),
+ *   NCS_OUTEN = 0 and the pin is not driven at all — writing SW in
+ *   NCS_CTRL has no effect on the wire.
+ *
+ * Fix: after init, keep CTRL = NCS_OUTEN | SCLK_OUTEN | MOSI_OUTEN at
+ * all times (output-enables always on).  When disabling the engine after
+ * a transfer, only clear EN (bit 1).  Never write 0x0 to CTRL again after
+ * the initial RX-flush sequence.
+ *
+ * CS is owned exclusively by set_cs() (called by the SPI framework).
+ * transfer_one does NOT touch NCS_CTRL.
+ */
+
 #include <linux/delay.h>
-#include <linux/device.h>
-#include <linux/iopoll.h>
+#include <linux/io.h>
+#include <linux/module.h>
+#include <linux/of_platform.h>
+#include <linux/spi/spi.h>
 #include <linux/types.h>
+#include <linux/vmalloc.h>
 
+#define MINDGROVE_SPI_DRIVER_NAME	"mindgrove_spi"
 
-#define SECURE_IOT_SPI_DRIVER_NAME       "secure_iot_spi"
-#define MINDGROVE_SPI_MAX_CS 4
-#define MINDGROVE_SPI_DEFAULT_DEPTH 32
-#define MINDGROVE_SPI_DEFAULT_BITS 8
-#define MINDGROVE_SPI_TIMEOUT_US 1000000
-#define MINDGROVE_SPI_MAX_FREQ 35000000
-
-#define NCS_ENABLE 1
-#define NCS_DISABLE 0
-#define SPI_CLK_PRESCALE(x)     (((x) & 0x3FFFU) << 2)
-#define SPI_LSB_FIRST_SHIFT(x) ((x)<<0)
-#define  SPI_LSB_FIRST 1
+#define MINDGROVE_SPI_MAX_CS		4
+#define MINDGROVE_SPI_DEFAULT_DEPTH	32
+#define MINDGROVE_SPI_DEFAULT_BITS	8
+#define MINDGROVE_SPI_TIMEOUT_US	1000000
+#define MINDGROVE_SPI_MAX_FREQ		35000000
+#define MINDGROVE_SPI_INIT_PRESCALER	2u	/* 50MHz/(2+1) = 16.67 MHz */
+#define MINDGROVE_SPI_YIELD_INTERVAL	64
 
 /* Register offsets */
-#define MINDGROVE_SPI_REG_CTRL 0x00		   /* Control register */
-#define MINDGROVE_SPI_REG_CLK_CTRL 0x04	   /* Clock control register */
-#define MINDGROVE_SPI_REG_TX 0x08		   /* TX data register */
-#define MINDGROVE_SPI_REG_RX 0x0C		   /* RX data register */
-#define MINDGROVE_SPI_REG_INTR_EN 0x10	   /* Interrupt enable */
-#define MINDGROVE_SPI_REG_FIFO_STATUS 0x14 /* FIFO status */
-#define MINDGROVE_SPI_REG_COMM_STATUS 0x18 /* Communication status */
-#define MINDGROVE_SPI_REG_NCS_CTRL 0x1C	   /* NCS control */
+#define MINDGROVE_SPI_REG_CTRL		0x00
+#define MINDGROVE_SPI_REG_CLK_CTRL	0x04
+#define MINDGROVE_SPI_REG_TX		0x08
+#define MINDGROVE_SPI_REG_RX		0x0C
+#define MINDGROVE_SPI_REG_INTR_EN	0x10
+#define MINDGROVE_SPI_REG_FIFO_STATUS	0x14
+#define MINDGROVE_SPI_REG_COMM_STATUS	0x18	/* 16-bit */
+#define MINDGROVE_SPI_REG_NCS_CTRL	0x1C	/* 32-bit */
 
-/* CTRL register bit definitions */
-#define MINDGROVE_SPI_CTRL_SLAVE_MODE(x) ((x) << 0)
-#define MINDGROVE_SPI_CTRL_MISO_MODE(x)((x) << 24)
-#define MINDGROVE_SPI_CTRL_EN(x) ((x) << 1)
-#define MINDGROVE_SPI_CTRL_LSBFIRST(x) ((x) << 2)
-#define MINDGROVE_SPI_CTRL_RX_FLUSH(x) ((x) << 3)
-#define MINDGROVE_SPI_CTRL_COMM_MODE_MASK GENMASK(5, 4)
-#define MINDGROVE_SPI_CTRL_COMM_MODE(x) ((x) << 4)
-#define MINDGROVE_SPI_CTRL_TOTAL_BIT_TX_MASK GENMASK(13, 6)
-#define MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(x) ((x) << 6)
-#define MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK GENMASK(21, 14)
-#define MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(x) ((x) << 14)
-#define MINDGROVE_SPI_CTRL_SCLK_OUTEN ((u32)1UL << 22)
-#define MINDGROVE_SPI_CTRL_NCS_OUTEN ((u32)1UL << 23)
-#define MINDGROVE_SPI_CTRL_MISO_OUTEN ((u32)1UL << 24)
-#define MINDGROVE_SPI_CTRL_MOSI_OUTEN ((u32)1UL << 25)
+/* CTRL register bits */
+#define MINDGROVE_SPI_CTRL_SLAVE_MODE(x)	((x) << 0)
+#define MINDGROVE_SPI_CTRL_EN(x)		((x) << 1)
+#define MINDGROVE_SPI_CTRL_LSBFIRST(x)		((x) << 2)
+#define MINDGROVE_SPI_CTRL_RX_FLUSH(x)		((x) << 3)
+#define MINDGROVE_SPI_CTRL_COMM_MODE(x)	((x) << 4)
+#define MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(x)	((x) << 6)
+#define MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(x)	((x) << 14)
+#define MINDGROVE_SPI_CTRL_SCLK_OUTEN		((u32)BIT(22))
+#define MINDGROVE_SPI_CTRL_NCS_OUTEN		((u32)BIT(23))
+/* bit 24 = MISO_OUTEN — do NOT set in master mode */
+#define MINDGROVE_SPI_CTRL_MOSI_OUTEN		((u32)BIT(25))
 
-/* CLK_CTRL register bit definitions */
-#define MINDGROVE_SPI_CLK_CTRL_POLARITY BIT(0)
-#define MINDGROVE_SPI_CLK_CTRL_PHASE BIT(1)
-#define MINDGROVE_SPI_CLK_CTRL_PRESCALAR_SHIFT 2
-#define MINDGROVE_SPI_CLK_CTRL_PRESCALAR_MASK GENMASK(15, 2)
-#define MINDGROVE_SPI_CLK_CTRL_SETUP_SHIFT 16
-#define MINDGROVE_SPI_CLK_CTRL_SETUP_MASK GENMASK(23, 16)
-#define MINDGROVE_SPI_CLK_CTRL_HOLD_SHIFT 24
-#define MINDGROVE_SPI_CLK_CTRL_HOLD_MASK GENMASK(31, 24)
+/*
+ * CTRL_PIN_MASK — output-enable bits that must ALWAYS stay set after init
+ * so that set_cs() (which writes NCS_CTRL.SW) physically drives the NCS pin.
+ * Only the EN bit is toggled per-transfer.
+ */
+#define MINDGROVE_SPI_CTRL_PIN_MASK	(MINDGROVE_SPI_CTRL_SCLK_OUTEN | \
+					 MINDGROVE_SPI_CTRL_NCS_OUTEN   | \
+					 MINDGROVE_SPI_CTRL_MOSI_OUTEN)
 
-/* FIFO_STATUS register bit definitions */
-#define MINDGROVE_SPI_FIFO_STATUS_TX_EMPTY BIT(0)
-#define MINDGROVE_SPI_FIFO_STATUS_TX_HALF  BIT(4)
-#define MINDGROVE_SPI_FIFO_STATUS_TX_FULL BIT(8)
-#define MINDGROVE_SPI_FIFO_STATUS_RX_EMPTY BIT(9)
-#define MINDGROVE_SPI_FREQ_STATUS_RX_HALF  BIT(13)
-#define MINDGROVE_SPI_FIFO_STATUS_RX_FULL BIT(17)
+/* CLK_CTRL register */
+#define MINDGROVE_SPI_CLK_CTRL_POLARITY		BIT(0)
+#define MINDGROVE_SPI_CLK_CTRL_PHASE		BIT(1)
+#define MINDGROVE_SPI_CLK_CTRL_PRESCALAR_SHIFT	2
+#define MINDGROVE_SPI_CLK_CTRL_PRESCALAR_MASK	GENMASK(15, 2)
+#define MINDGROVE_SPI_CLK_CTRL_SETUP_SHIFT	16
+#define MINDGROVE_SPI_CLK_CTRL_HOLD_SHIFT	24
 
-/* COMM_STATUS register bit definitions */
-#define MINDGROVE_SPI_COMM_STATUS_BUSY BIT(0)
-#define MINDGROVE_SPI_COMM_STATUS_TX_DEPTH_SHIFT 3
-#define MINDGROVE_SPI_COMM_STATUS_TX_DEPTH_MASK GENMASK(5, 3)
-#define MINDGROVE_SPI_COMM_STATUS_RX_DEPTH_SHIFT 6
-#define MINDGROVE_SPI_COMM_STATUS_RX_DEPTH_MASK GENMASK(8, 6)
+/* FIFO_STATUS (32-bit) */
+#define MINDGROVE_SPI_FIFO_STATUS_TX_EMPTY	BIT(0)
+#define MINDGROVE_SPI_FIFO_STATUS_TX_FULL	BIT(8)
+#define MINDGROVE_SPI_FIFO_STATUS_RX_EMPTY	BIT(9)
 
-/* NCS_CTRL register bit definitions */
-#define MINDGROVE_SPI_NCS_CTRL_SELECT(x) ((x) << 0)
-#define MINDGROVE_SPI_NCS_CTRL_SW(x) ((x) << 1)
+/* COMM_STATUS (16-bit — always use readw) */
+#define MINDGROVE_SPI_COMM_STATUS_BUSY		BIT(0)
 
-/* Communication modes */
-#define MINDGROVE_SPI_COMM_MODE_TX 0
-#define MINDGROVE_SPI_COMM_MODE_RX 1
-#define MINDGROVE_SPI_COMM_MODE_HALF_DUPLEX 2
-#define MINDGROVE_SPI_COMM_MODE_FULL_DUPLEX 3
+/* NCS_CTRL (32-bit) */
+#define MINDGROVE_SPI_NCS_CTRL_SELECT(x)	((u32)((x) << 0))
+#define MINDGROVE_SPI_NCS_CTRL_SW(x)		((u32)((x) << 1))
 
-/*Enablement of different interrupts for SPI*/
-#define MINDGROVE_SPI_INTR_TX_FIFO_EMPTY       (1 << 0)
-#define MINDGROVE_SPI_INTR_TX_FIFO_HALF        (1 << 4)
-#define MINDGROVE_SPI_INTR_TX_FULL             (1 << 8)
-#define MINDGROVE_SPI_INTR_RX_EMPTY            (1 << 9)
-#define MINDGROVE_SPI_INTR_RX_HALF             (1  << 13)
-#define MINDGROVE_SPI_INTR_RX_FULL             (1  << 17)
+#define MINDGROVE_SPI_COMM_MODE_FULL_DUPLEX	3
 
-/*default changes for secure iot*/
-#define SECURE_IOT_SPI_WAIT_TX_IDLE     (1U<<0)  //Wait for tx fifo empty.
-#define SECURE_IOT_SPI_WAIT_RX_FULL     (1U << 17)  //wait for rx fifo full
-#define SECURE_IOT_SPI_WAIT_TX_FULL    (1U<<8)  //Wait for tx fifo empty.
-#define SECURE_IOT_SPI_WAIT_RX_EMPTY     (1U << 9)  //wait for rx fifo full
-#define SECURE_IOT_SPI_WAIT_TX_HALF       (1U << 4)
-#define SECURE_IOT_SPI_WAIT_RX_HALF        (1U << 13)
-#define SECURE_IOT_SPI_WAIT_BUSY_CLR    (1U << 2)   //wait for busy =0
-
-struct secure_iot_spi{
-    void __iomem *regs; /*virt address of the control registers*/
-    struct clk *clk;    /*bus clk set from the dts file*/
-    __u8 cs_inactive;
-    unsigned int fifo_depth;
-    struct completion done;
-    struct completion tx_done;
-    struct completion rx_done;
-    __u32 polling; //1 for polling , 0 for interrupt based.
-    struct device *dev;
+struct mindgrove_spi {
+	struct device		*dev;
+	struct spi_master	*master;
+	void __iomem		*base;
+	phys_addr_t		phys;
+	u32			fifo_depth;
+	u32			bits_per_word;
+	u32			input_clk_hz;
+	u32			spi_freq;
+	bool			cpol;
+	bool			cpha;
+	bool			lsb_first;
+	u16			prescaler;
+	u8			num_cs;
+	spinlock_t		lock;
 };
 
-static int secure_iot_spi_init(struct secure_iot_spi *spi){
-    /*Interrupts are disabled by default*/
-    writel(0,spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-    writel(0, spi->regs + MINDGROVE_SPI_REG_CTRL);
-    //ctrl |= MINDGROVE_SPI_CTRL_SLAVE_MODE(0); 
-    //set by default.
+/* ------------------------------------------------------------------ */
+/* Register helpers                                                     */
+/* ------------------------------------------------------------------ */
 
-	/* Flush RX FIFO */
-	writel(MINDGROVE_SPI_CTRL_RX_FLUSH(1), spi->regs + MINDGROVE_SPI_REG_CTRL);
-	writel(MINDGROVE_SPI_CTRL_RX_FLUSH(0), spi->regs + MINDGROVE_SPI_REG_CTRL);
-    __u32 regs_out = readl(spi->regs+MINDGROVE_SPI_REG_CTRL);
-    regs_out |= (MINDGROVE_SPI_CTRL_SCLK_OUTEN | MINDGROVE_SPI_CTRL_NCS_OUTEN | MINDGROVE_SPI_CTRL_MOSI_OUTEN );
-    regs_out &= ~(MINDGROVE_SPI_CTRL_MISO_MODE(1));
-    regs_out &= ~(MINDGROVE_SPI_CTRL_SLAVE_MODE(1));
-    writel(regs_out, spi->regs + MINDGROVE_SPI_REG_CTRL);
-
-
-	/* Set default setup and hold times */
-	writel((1 << MINDGROVE_SPI_CLK_CTRL_SETUP_SHIFT) |
-			   (1 << MINDGROVE_SPI_CLK_CTRL_HOLD_SHIFT),
-		   spi->regs + MINDGROVE_SPI_REG_CLK_CTRL);
-
-	/* Configure NCS for software control */
-	//writeb(MINDGROVE_SPI_NCS_CTRL_SELECT(1), spi->regs + MINDGROVE_SPI_REG_NCS_CTRL);
-    /* Software CS, deasserted (NCS high = idle) */
-    writeb(MINDGROVE_SPI_NCS_CTRL_SELECT(1) | MINDGROVE_SPI_NCS_SW(1), spi->regs + MINDGROVE_SPI_REG_NCS_CTRL);
-    return 0;
-}
-
-static int secure_iot_spi_interrupt_enable(struct secure_iot_spi *spi){
-    writel(0xffffffff,spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-    return 0;
-}
-static int secure_iot_spi_prepare_message(struct spi_controller *host, struct spi_message *msg)
+/*
+ * mindgrove_spi_ctrl_disable - clear EN bit, keep output enables.
+ *
+ * NEVER write 0x0 to CTRL after init — doing so clears NCS_OUTEN and
+ * the physical CS pin stops being driven (confirmed on oscilloscope).
+ */
+static void mindgrove_spi_ctrl_disable(struct mindgrove_spi *spi)
 {
-    struct secure_iot_spi *spi =spi_controller_get_devdata(host);
-    struct spi_device *device =msg->spi;
-    spi->cs_inactive = spi_get_chipselect(device,0);
-    writel(MINDGROVE_SPI_NCS_CTRL_SELECT(spi->cs_inactive)|MINDGROVE_SPI_NCS_CTRL_SELECT(1),spi->regs+MINDGROVE_SPI_REG_NCS_CTRL);
-    /* Updating of chip select for initial high. */
-    writel( MINDGROVE_SPI_CTRL_COMM_MODE(device->mode)&MINDGROVE_SPI_CTRL_COMM_MODE_MASK,spi->regs+MINDGROVE_SPI_REG_CLK_CTRL);
-    /* setting of the clock mode of operation. */
-    return 0;
+	u32 ctrl = readl(spi->base + MINDGROVE_SPI_REG_CTRL);
+
+	ctrl &= ~MINDGROVE_SPI_CTRL_EN(1);	/* clear EN only */
+	ctrl |= MINDGROVE_SPI_CTRL_PIN_MASK;	/* always keep output enables */
+	writel(ctrl, spi->base + MINDGROVE_SPI_REG_CTRL);
 }
 
-static int mindgrove_spi_set_mode(struct secure_iot_spi *spi, u32 mode)
+/* ------------------------------------------------------------------ */
+/* Hardware helpers                                                     */
+/* ------------------------------------------------------------------ */
+
+static int mindgrove_spi_wait_complete(struct mindgrove_spi *spi)
 {
-	//struct secure_iot_spi *spi = spi_controller_get_devdata(host);
-	u32 clk_ctrl;
-	u8 ncs_ctrl = 0;
+	u32 timeout = MINDGROVE_SPI_TIMEOUT_US;
+	u32 iter = 0;
 
-	/* Switch clock mode bits */
-	clk_ctrl = readl(spi->regs + MINDGROVE_SPI_REG_CLK_CTRL);
-	clk_ctrl &= ~(MINDGROVE_SPI_CLK_CTRL_POLARITY | MINDGROVE_SPI_CLK_CTRL_PHASE);
+	while (timeout--) {
+		u32 fs = readl(spi->base + MINDGROVE_SPI_REG_FIFO_STATUS);
+		u16 cs = readw(spi->base + MINDGROVE_SPI_REG_COMM_STATUS);
 
-	if (mode & SPI_CPHA)
-		clk_ctrl |= MINDGROVE_SPI_CLK_CTRL_PHASE;
-	if (mode & SPI_CPOL)
-		clk_ctrl |= MINDGROVE_SPI_CLK_CTRL_POLARITY;
+		if ((fs & MINDGROVE_SPI_FIFO_STATUS_TX_EMPTY) &&
+		    !(cs & MINDGROVE_SPI_COMM_STATUS_BUSY))
+			return 0;
 
-	writel(clk_ctrl, spi->regs + MINDGROVE_SPI_REG_CLK_CTRL);
-
-	/* Set LSB first if required */
-	if (mode & SPI_LSB_FIRST)
-	{
-		u32 ctrl = readl(spi->regs + MINDGROVE_SPI_REG_CTRL) |
-				   MINDGROVE_SPI_CTRL_LSBFIRST(1);
-		writel(ctrl, spi->regs + MINDGROVE_SPI_REG_CTRL);
+		
+		if (!(++iter % MINDGROVE_SPI_YIELD_INTERVAL))
+			cond_resched();
 	}
-	/* Configure NCS control for software mode */
-	ncs_ctrl = readl(spi->regs + MINDGROVE_SPI_REG_NCS_CTRL) |
-			   MINDGROVE_SPI_NCS_CTRL_SELECT(1);
+	dev_err(spi->dev, "wait_complete TIMEOUT FIFO=0x%08x COMM=0x%04x\n",
+		readl(spi->base + MINDGROVE_SPI_REG_FIFO_STATUS),
+		readw(spi->base + MINDGROVE_SPI_REG_COMM_STATUS));
+	return -ETIMEDOUT;
+}
 
-	/* Update the chip select polarity */
-	if (mode & SPI_CS_HIGH)
-		ncs_ctrl |= MINDGROVE_SPI_NCS_CTRL_SW(1);
+/* Caller MUST hold spi->lock */
+static int mindgrove_spi_set_speed_locked(struct mindgrove_spi *spi, u32 speed)
+{
+	u32 prescaler, clk_ctrl, actual_freq;
 
-	writeb(ncs_ctrl, spi->regs + MINDGROVE_SPI_REG_NCS_CTRL);
+	if (!speed)
+		return 0;
+
+	prescaler = spi->input_clk_hz / speed;
+	if (prescaler)
+		prescaler -= 1;
+	if (prescaler > 0x3FFF)
+		prescaler = 0x3FFF;
+
+	actual_freq = spi->input_clk_hz / (prescaler + 1);
+	if (actual_freq > MINDGROVE_SPI_MAX_FREQ) {
+		dev_err(spi->dev, "freq %u Hz exceeds max %u Hz\n",
+			actual_freq, MINDGROVE_SPI_MAX_FREQ);
+		return -EINVAL;
+	}
+
+	if (prescaler == spi->prescaler)
+		return 0;
+
+	spi->prescaler = prescaler;
+	spi->spi_freq  = speed;
+
+	clk_ctrl  = readl(spi->base + MINDGROVE_SPI_REG_CLK_CTRL);
+	clk_ctrl &= ~MINDGROVE_SPI_CLK_CTRL_PRESCALAR_MASK;
+	clk_ctrl |= (prescaler << MINDGROVE_SPI_CLK_CTRL_PRESCALAR_SHIFT);
+	writel(clk_ctrl, spi->base + MINDGROVE_SPI_REG_CLK_CTRL);
+
+	dev_dbg(spi->dev,
+		 "set_speed: req=%u actual=%u prescaler=%u CLK_CTRL=0x%08x\n",
+		 speed, actual_freq, prescaler,
+		 readl(spi->base + MINDGROVE_SPI_REG_CLK_CTRL));
 	return 0;
 }
 
-static int secure_iot_spi_prep_transfer(struct secure_iot_spi *spi, struct spi_device *device , struct spi_transfer *t)
+/*
+ * mindgrove_spi_prep — enable the SPI engine for one transfer.
+ *
+ * Writes all CTRL bits including PIN_MASK (output enables) and EN.
+ * This is called from transfer_one after set_cs() has asserted CS.
+ */
+static void mindgrove_spi_prep(struct mindgrove_spi *spi)
 {
-    //for clk control we setup the prescalar.
-    __u8 prescalar = DIV_ROUND_UP(clk_get_rate(spi->clk)>>1 ,t->speed_hz -1);
-    unsigned int mode;
-    prescalar =3;
-    __u32 prev_clk = readl(spi->regs+MINDGROVE_SPI_REG_CLK_CTRL);
-    prev_clk &= SPI_CLK_PRESCALE(0);
-    prev_clk |= SPI_CLK_PRESCALE(prescalar);
-    writel(prev_clk,spi->regs+MINDGROVE_SPI_REG_CLK_CTRL);
-    //pre scalar configuration made
-    /* Mode size setup for fifo block output */
-    mode = max_t(unsigned int, t->rx_nbits, t->tx_nbits);
-    __u32 ctrl_spi = readl(spi->regs+MINDGROVE_SPI_REG_CTRL);
-    ctrl_spi = (MINDGROVE_SPI_CTRL_COMM_MODE(MINDGROVE_SPI_COMM_MODE_FULL_DUPLEX));
-    /*Setting the mode of transaction in spi */
-    // ctrl_spi &= ~(MINDGROVE_SPI_CTRL_TOTAL_BIT_TX_MASK| MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(0xFF) );   //remove tx configuration.
-    // ctrl_spi &= ~(MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK| MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(0xFF) );   //remove rx configuration.
-    ctrl_spi &= ~MINDGROVE_SPI_CTRL_TOTAL_BIT_TX_MASK;
-    ctrl_spi &= ~MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK;
-    ctrl_spi &= ~MINDGROVE_SPI_CTRL_COMM_MODE_MASK;
+	u32 ctrl;
 
-    switch(mode){
-        case 8:
-            ctrl_spi |= ((MINDGROVE_SPI_CTRL_TOTAL_BIT_TX_MASK)&MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(8));
-            ctrl_spi |= ((MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK)&MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(8));
-            break;
-        case 16:
-            ctrl_spi |= ((MINDGROVE_SPI_CTRL_TOTAL_BIT_TX_MASK)&MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(16));
-            ctrl_spi |= ((MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK)&MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(16));
-            break;
-        case 32:
-            ctrl_spi |= ((MINDGROVE_SPI_CTRL_TOTAL_BIT_TX_MASK)&MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(32));
-            ctrl_spi |= ((MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK)&MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(32));
-            break;  
-        default:
-            ctrl_spi |= ((MINDGROVE_SPI_CTRL_TOTAL_BIT_TX_MASK)&MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(8));
-            ctrl_spi |= ((MINDGROVE_SPI_CTRL_TOTAL_BIT_RX_MASK)&MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(8));
-            break;      
-    }
+	ctrl  = MINDGROVE_SPI_CTRL_COMM_MODE(MINDGROVE_SPI_COMM_MODE_FULL_DUPLEX);
+	ctrl |= MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(spi->bits_per_word);
+	ctrl |= MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(spi->bits_per_word);
+	ctrl |= MINDGROVE_SPI_CTRL_PIN_MASK;	/* SCLK_OUTEN|NCS_OUTEN|MOSI_OUTEN */
+	if (spi->lsb_first)
+		ctrl |= MINDGROVE_SPI_CTRL_LSBFIRST(1);
+	ctrl |= MINDGROVE_SPI_CTRL_EN(1);
 
-    if(device->mode & SPI_LSB_FIRST){
-        ctrl_spi |= MINDGROVE_SPI_CTRL_LSBFIRST(1);
-    }
-    ctrl_spi |= (MINDGROVE_SPI_CTRL_SCLK_OUTEN |
-			MINDGROVE_SPI_CTRL_NCS_OUTEN |
-			MINDGROVE_SPI_CTRL_MOSI_OUTEN);
-
-	/* Configure control register */
-	ctrl_spi |= MINDGROVE_SPI_CTRL_EN(1);
-    /*Assuming we finished all the changes to be done for spi*/
-    writel(ctrl_spi,spi->regs+MINDGROVE_SPI_REG_CTRL);
-    mindgrove_spi_set_mode(spi, device->mode);
-    return spi->polling;
-
+	writel(ctrl, spi->base + MINDGROVE_SPI_REG_CTRL);
+	dev_dbg(spi->dev, "prep: CTRL=0x%08x rb=0x%08x\n",
+		 ctrl, readl(spi->base + MINDGROVE_SPI_REG_CTRL));
 }
 
-static irqreturn_t secure_iot_spi_irq(int irq, void *dev_id)
+static int mindgrove_spi_wait_tx_not_full(struct mindgrove_spi *spi)
 {
-    struct secure_iot_spi *spi = dev_id;
-    u32 intr_en , fifo_status;
-    intr_en = readl(spi->regs + MINDGROVE_SPI_REG_INTR_EN);
-    fifo_status = readl(spi->regs + MINDGROVE_SPI_REG_FIFO_STATUS);
-    if((intr_en & MINDGROVE_SPI_INTR_TX_FIFO_EMPTY)&& fifo_status & MINDGROVE_SPI_FIFO_STATUS_TX_EMPTY){
-        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-        complete(&spi->tx_done);
-        complete(&spi->done);
-        return IRQ_HANDLED;
-    }
-    if((intr_en & MINDGROVE_SPI_INTR_TX_FIFO_HALF) && (fifo_status & MINDGROVE_SPI_FIFO_STATUS_TX_HALF)){
-        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-        complete(&spi->tx_done);
-        complete(&spi->done);
-        /*Tx half fifo interrupt*/
-        return IRQ_HANDLED;
-    }
-    if((intr_en & MINDGROVE_SPI_INTR_TX_FULL) && (fifo_status & MINDGROVE_SPI_FIFO_STATUS_TX_FULL)){
-        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-        complete(&spi->tx_done);
-        complete(&spi->done);
-        return IRQ_HANDLED;
-    }
-    if((intr_en & MINDGROVE_SPI_INTR_RX_EMPTY ) && (fifo_status & MINDGROVE_SPI_FIFO_STATUS_RX_EMPTY)){
-        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-        complete(&spi->rx_done);
-        complete(&spi->done);
-        return IRQ_HANDLED;
-    }
-    if((intr_en & MINDGROVE_SPI_INTR_RX_HALF ) && (fifo_status & MINDGROVE_SPI_FREQ_STATUS_RX_HALF)){
-        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-        complete(&spi->rx_done);
-        complete(&spi->done);
-        return IRQ_HANDLED;
-    }
-    if((intr_en & MINDGROVE_SPI_INTR_RX_FULL ) && (fifo_status & MINDGROVE_SPI_FIFO_STATUS_RX_FULL)){
-        writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-        complete(&spi->rx_done);
-        complete(&spi->done);
-        return IRQ_HANDLED;
-    }
-    writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-    
-    return IRQ_NONE;
+	u32 timeout = MINDGROVE_SPI_TIMEOUT_US;
+	u32 iter = 0;
+
+	while (readl(spi->base + MINDGROVE_SPI_REG_FIFO_STATUS) &
+	       MINDGROVE_SPI_FIFO_STATUS_TX_FULL) {
+		if (!timeout--) {
+			dev_err(spi->dev, "TX FIFO full TIMEOUT FIFO=0x%08x\n",
+				readl(spi->base + MINDGROVE_SPI_REG_FIFO_STATUS));
+			return -ETIMEDOUT;
+		}
+		
+		if (!(++iter % MINDGROVE_SPI_YIELD_INTERVAL))
+			cond_resched();
+	}
+	return 0;
 }
 
-static void secure_iot_spi_set_cs(struct spi_device *device, bool is_high)
+static int mindgrove_spi_wait_rx_not_empty(struct mindgrove_spi *spi)
 {
-    struct secure_iot_spi *spi = spi_controller_get_devdata(device->controller);
-    if(is_high){
-        writel(MINDGROVE_SPI_NCS_CTRL_SW(1)|MINDGROVE_SPI_NCS_CTRL_SELECT(1), spi->regs+MINDGROVE_SPI_REG_NCS_CTRL);
-    }
-    //setting the chip select value to low to turn on.
-    else{
-        writel(MINDGROVE_SPI_NCS_CTRL_SW(0)|MINDGROVE_SPI_NCS_CTRL_SELECT(1), spi->regs+MINDGROVE_SPI_REG_NCS_CTRL);
-    }
+	u32 timeout = MINDGROVE_SPI_TIMEOUT_US;
+	u32 iter = 0;
+
+	while (readl(spi->base + MINDGROVE_SPI_REG_FIFO_STATUS) &
+	       MINDGROVE_SPI_FIFO_STATUS_RX_EMPTY) {
+		if (!timeout--) {
+			dev_err(spi->dev, "RX FIFO empty TIMEOUT FIFO=0x%08x\n",
+				readl(spi->base + MINDGROVE_SPI_REG_FIFO_STATUS));
+			return -ETIMEDOUT;
+		}
+		
+		if (!(++iter % MINDGROVE_SPI_YIELD_INTERVAL))
+			cond_resched();
+	}
+	return 0;
 }
 
-// spi wait for completion logic : 
-static void secure_iot_spi_wait (struct secure_iot_spi *spi, u32 bit, int poll){
-    unsigned long timeout = 1000000;
-    int use_polling = poll;
-    if(use_polling){
-        __u32 fifo_status;
-        __u16 comm_status;
+/* ------------------------------------------------------------------ */
+/* SPI master callbacks                                                 */
+/* ------------------------------------------------------------------ */
 
-        /*polling loop*/
-        /*Polling mode for faster transfers */
-        while(timeout -- >0){
-            fifo_status = readl(spi->regs + MINDGROVE_SPI_REG_FIFO_STATUS);
-            comm_status = readw(spi->regs +MINDGROVE_SPI_REG_COMM_STATUS);
-            bool tx_idle = (fifo_status & MINDGROVE_SPI_FIFO_STATUS_TX_EMPTY);
-            bool rx_full = (fifo_status & MINDGROVE_SPI_FIFO_STATUS_RX_FULL);
-            //bool busy = (fifo_status & SECURE_IOT_SPI_WAIT_BUSY_CLR);
-            bool busy    = (comm_status & MINDGROVE_SPI_COMM_STATUS_BUSY);
-            //Check functioning 
-            
-            //Check conditions based on bit mask :
-            if((bit & SECURE_IOT_SPI_WAIT_TX_IDLE) && tx_idle){
-                if( !(bit & SECURE_IOT_SPI_WAIT_BUSY_CLR) || !busy){
-                    return;
-                }
-            }
-
-            if((bit & SECURE_IOT_SPI_WAIT_RX_FULL)&& rx_full){
-                return;
-            }
-
-            udelay(1);
-        }
-    }
-    else{
-        /*interrupt based : enable interrupt and wait.*/
-        u32 intr_en = readl(spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-        if(bit & SECURE_IOT_SPI_WAIT_TX_FULL){
-            intr_en |= MINDGROVE_SPI_INTR_TX_FULL;
-        }
-
-        if(bit & SECURE_IOT_SPI_WAIT_RX_EMPTY){
-            intr_en |= MINDGROVE_SPI_INTR_RX_EMPTY;
-        }
-
-        /*Save the state if needed */
-        reinit_completion(&spi->done); 
-        //To see if the transaction is completed via done
-        writel(intr_en, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-        wait_for_completion(&spi->done);
-
-        /*optionally clear interrupt*/
-        //writel(0, spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-    }
-}
-
-static int secure_iot_spi_wait_rx_data(struct secure_iot_spi *spi)
+/*
+ * mindgrove_spi_set_cs — assert or deassert chip select.
+ *
+ * Because NCS_OUTEN is always kept set in CTRL (see init_hw and
+ * mindgrove_spi_ctrl_disable), writing SW here PHYSICALLY drives the
+ * NCS pin immediately, with no need for the engine to be running.
+ *
+ * NCS_CTRL SW truth table:
+ *   SW=0 → NCS pin LOW  → CS asserted   (active-low device, normal case)
+ *   SW=1 → NCS pin HIGH → CS deasserted
+ *
+ *   enable  cs_high  SW    result
+ *     T       F       0    assert   (active-low)
+ *     T       T       1    assert   (active-high)
+ *     F       F       1    deassert (active-low)
+ *     F       T       0    deassert (active-high)
+ *   → SW = (enable == cs_high)
+ */
+static void mindgrove_spi_set_cs(struct spi_device *spi_dev, bool enable)
 {
-    u32 status;
-    return readl_poll_timeout_atomic(spi->regs + MINDGROVE_SPI_REG_FIFO_STATUS, 
-                                     status, !(status & MINDGROVE_SPI_FIFO_STATUS_RX_EMPTY), 
-                                     1, 100000);
+	struct mindgrove_spi *spi = spi_master_get_devdata(spi_dev->master);
+	bool cs_high = !!(spi_dev->mode & SPI_CS_HIGH);
+	u32 ncs_ctrl;
+
+	/*
+	 * Safety: ensure NCS_OUTEN is set before writing SW.
+	 * Normally it is always set after init, but guard against
+	 * any future path that might clear CTRL.
+	 */
+	u32 ctrl = readl(spi->base + MINDGROVE_SPI_REG_CTRL);
+	if (!(ctrl & MINDGROVE_SPI_CTRL_NCS_OUTEN)) {
+		ctrl |= MINDGROVE_SPI_CTRL_PIN_MASK;
+		writel(ctrl, spi->base + MINDGROVE_SPI_REG_CTRL);
+		dev_warn(spi->dev,
+			 "set_cs: NCS_OUTEN was clear! restored CTRL=0x%08x\n",
+			 readl(spi->base + MINDGROVE_SPI_REG_CTRL));
+	}
+
+	ncs_ctrl = readl(spi->base + MINDGROVE_SPI_REG_NCS_CTRL);
+
+	if (!(enable == cs_high))
+		ncs_ctrl |=  MINDGROVE_SPI_NCS_CTRL_SW(1);	/* SW=1 */
+	else
+		ncs_ctrl &= ~MINDGROVE_SPI_NCS_CTRL_SW(1);	/* SW=0 */
+
+	writel(ncs_ctrl, spi->base + MINDGROVE_SPI_REG_NCS_CTRL);
+
+	dev_dbg(spi->dev,
+		 "set_cs: %s cs=%u cs_high=%d SW=%d "
+		 "NCS_CTRL=0x%08x CTRL=0x%08x\n",
+		 enable ? "ASSERT  " : "DEASSERT",
+		 spi_dev->chip_select, cs_high,
+		 !!(ncs_ctrl & MINDGROVE_SPI_NCS_CTRL_SW(1)),
+		 readl(spi->base + MINDGROVE_SPI_REG_NCS_CTRL),
+		 readl(spi->base + MINDGROVE_SPI_REG_CTRL));
 }
 
-static int secure_iot_spi_wait_tx_data(struct secure_iot_spi *spi)
+static int mindgrove_spi_setup(struct spi_device *spi_dev)
 {
-    u32 status;
-    
-    /* * Read FIFO_STATUS until TX_EMPTY (Bit 0) is 1.
-     * Check every 1us, timeout after 100ms (100,000us).
-     */
-    return readl_poll_timeout_atomic(spi->regs + MINDGROVE_SPI_REG_FIFO_STATUS, 
-                                     status, !(status & MINDGROVE_SPI_FIFO_STATUS_TX_FULL), 
-                                     1, 100000);
+	struct mindgrove_spi *spi = spi_master_get_devdata(spi_dev->master);
+	unsigned long flags;
+	u32 clk_ctrl;
+
+	spin_lock_irqsave(&spi->lock, flags);
+
+	spi->cpha = !!(spi_dev->mode & SPI_CPHA);
+	spi->cpol = !!(spi_dev->mode & SPI_CPOL);
+
+	clk_ctrl  = readl(spi->base + MINDGROVE_SPI_REG_CLK_CTRL);
+	clk_ctrl &= ~(MINDGROVE_SPI_CLK_CTRL_POLARITY |
+		      MINDGROVE_SPI_CLK_CTRL_PHASE);
+	if (spi->cpha)
+		clk_ctrl |= MINDGROVE_SPI_CLK_CTRL_PHASE;
+	if (spi->cpol)
+		clk_ctrl |= MINDGROVE_SPI_CLK_CTRL_POLARITY;
+	writel(clk_ctrl, spi->base + MINDGROVE_SPI_REG_CLK_CTRL);
+
+	spi->lsb_first = !!(spi_dev->mode & SPI_LSB_FIRST);
+	spi->bits_per_word = spi_dev->bits_per_word ?
+			     spi_dev->bits_per_word : MINDGROVE_SPI_DEFAULT_BITS;
+
+	dev_dbg(spi->dev,
+		 "setup: mode=0x%x cpol=%d cpha=%d lsb=%d bpw=%d "
+		 "CLK_CTRL=0x%08x\n",
+		 spi_dev->mode, spi->cpol, spi->cpha, spi->lsb_first,
+		 spi->bits_per_word,
+		 readl(spi->base + MINDGROVE_SPI_REG_CLK_CTRL));
+
+	spin_unlock_irqrestore(&spi->lock, flags);
+	return 0;
 }
 
-static void secure_iot_spi_tx(struct secure_iot_spi *spi, const u8 *tx_ptr)
+static int mindgrove_spi_prepare_msg(struct spi_master *master,
+				     struct spi_message *msg)
 {
-    WARN_ON_ONCE((readl(spi->regs+MINDGROVE_SPI_REG_FIFO_STATUS)& MINDGROVE_SPI_INTR_TX_FULL) != 0);
-    //If tx is already full we cant write in new data for filling it in right.
-    writel(*tx_ptr, spi->regs+MINDGROVE_SPI_REG_TX );
+	struct mindgrove_spi *spi = spi_master_get_devdata(master);
+	struct spi_device *spi_dev = msg->spi;
+	unsigned long flags;
+	u32 speed;
+	int ret;
+
+	speed = spi_dev->max_speed_hz ? spi_dev->max_speed_hz : spi->spi_freq;
+	if (!speed)
+		speed = MINDGROVE_SPI_MAX_FREQ;
+
+	spin_lock_irqsave(&spi->lock, flags);
+	ret = mindgrove_spi_set_speed_locked(spi, speed);
+	spin_unlock_irqrestore(&spi->lock, flags);
+
+	return ret;
 }
 
-static void secure_iot_spi_rx(struct secure_iot_spi *spi, u8 *rx_ptr)
+static int mindgrove_spi_unprepare_msg(struct spi_master *master,
+				       struct spi_message *msg)
 {
-    u32 data = readl(spi->regs+MINDGROVE_SPI_REG_RX);
-    WARN_ON_ONCE((readl(spi->regs+MINDGROVE_SPI_REG_FIFO_STATUS)&MINDGROVE_SPI_INTR_RX_EMPTY)!=0);
-    //If rx is already empty we cant read new data from the rx buffer.
-    *rx_ptr = data;
-    /*no nedd to mask it as its the entire data segment.*/
+	return 0;
 }
 
-static int secure_iot_spi_transfer_one(struct spi_controller *host, struct spi_device *device , struct spi_transfer *t)
+/*
+ * transfer_one — byte-by-byte PIO transfer.
+ *
+ * CS is owned by the framework (set_cs before/after).  This function
+ * does NOT touch NCS_CTRL.
+ *
+ * Sequence:
+ *   [framework: set_cs(true)  → SW=0 → NCS pin LOW]
+ *   1. prep() — enable engine (EN=1, output-enables already set)
+ *   2. push/drain bytes
+ *   3. wait idle
+ *   4. ctrl_disable() — clear EN only, keep output-enables
+ *   [framework: set_cs(false) → SW=1 → NCS pin HIGH]
+ */
+static int mindgrove_spi_transfer_one(struct spi_master *master,
+				      struct spi_device *spi_dev,
+				      struct spi_transfer *t)
 {
-    //getting the remaining objects from the spi transfer object.
-    struct secure_iot_spi *spi = spi_controller_get_devdata(host);
-    int poll = secure_iot_spi_prep_transfer(spi,device ,t);
-    // as a transceive function operation:
-    const u8 *tx_ptr = t->tx_buf;
-    u8* rx_ptr = t->rx_buf;
-    unsigned int remaining_words = t->len;
+	struct mindgrove_spi *spi = spi_master_get_devdata(master);
+	const u8 *tx_buf = t->tx_buf;
+	u8 *rx_buf = t->rx_buf;
+	u32 len = t->len;
+	unsigned long flags;
+	u32 i, speed;
+	int ret;
 
-    while(remaining_words){
-        // unsigned int n_words = min(remaining_words, spi->fifo_depth);
-        // unsigned int i;
+	/* Per-transfer speed override */
+	speed = t->speed_hz ? t->speed_hz : spi->spi_freq;
+	if (!speed)
+		speed = MINDGROVE_SPI_MAX_FREQ;
 
-        // /* enqueue n words for transfer of data */
-        // for(int i=0;i<n_words;i++){
-        //     secure_iot_tx(spi, tx_ptr++);
-        // }
-        /*rx logic with delay passing */
+	spin_lock_irqsave(&spi->lock, flags);
+	ret = mindgrove_spi_set_speed_locked(spi, speed);
+	spin_unlock_irqrestore(&spi->lock, flags);
+	if (ret)
+		return ret;
 
-        //sending of data using delay in between.
-        //calling of the wait function.
-        //secure_iot_spi_wait(spi, SECURE_IOT_SPI_WAIT_TX_IDLE, spi->polling);
-        //secure_iot_spi_wait_done(spi);
-        //Wait for the tx buffer to be empty after the sending of the data 
-        secure_iot_spi_interrupt_enable(spi);
-        int ret = secure_iot_spi_wait_tx_data(spi);
-        if (ret) {
-                dev_err(spi->dev, "TX timeout\n");
-                return ret;
-        }
-        secure_iot_spi_tx(spi,tx_ptr++);
-        if(rx_ptr){
-            //secure_iot_spi_wait(spi,SECURE_IOT_SPI_WAIT_RX_FULL,spi->polling);
-            //secure_iot_spi_wait_done(spi); --> should find either tx/rx
-            //wait for any data to be present in rx for access.
-            secure_iot_spi_interrupt_enable(spi);
-            ret = secure_iot_spi_wait_rx_data(spi);
-            if (ret) {
-                dev_err(spi->dev, "RX timeout\n");
-                return ret;
-            }
-            secure_iot_spi_rx(spi,rx_ptr++);
-        }
-        remaining_words--;
-    }
-    spi_finalize_current_transfer(host);
-    return 0;
+	dev_dbg(spi->dev,
+		 "xfer START: len=%u speed=%u CTRL=0x%08x NCS_CTRL=0x%08x\n",
+		 len, speed,
+		 readl(spi->base + MINDGROVE_SPI_REG_CTRL),
+		 readl(spi->base + MINDGROVE_SPI_REG_NCS_CTRL));
+
+	/* Step 1: enable engine (CS already asserted by framework) */
+	mindgrove_spi_prep(spi);
+
+	/* Step 2: byte loop */
+	for (i = 0; i < len; i++) {
+		u8 tx_byte = tx_buf ? tx_buf[i] : 0xFF;
+		u8 rx_byte;
+
+		ret = mindgrove_spi_wait_tx_not_full(spi);
+		if (ret)
+			goto out_disable;
+
+		writeb(tx_byte, spi->base + MINDGROVE_SPI_REG_TX);
+
+		ret = mindgrove_spi_wait_rx_not_empty(spi);
+		if (ret)
+			goto out_disable;
+
+		rx_byte = readb(spi->base + MINDGROVE_SPI_REG_RX);
+		if (rx_buf)
+			rx_buf[i] = rx_byte;
+
+		if (i < 8)
+			dev_dbg(spi->dev,
+				 "  byte[%u]: TX=0x%02x RX=0x%02x FIFO=0x%08x\n",
+				 i, tx_byte, rx_byte,
+				 readl(spi->base + MINDGROVE_SPI_REG_FIFO_STATUS));
+	}
+
+	/* Step 3: wait for shift register idle */
+	ret = mindgrove_spi_wait_complete(spi);
+
+out_disable:
+	/*
+	 * Step 4: disable engine — clear EN only, keep NCS_OUTEN/SCLK_OUTEN/
+	 * MOSI_OUTEN so that the subsequent set_cs(false) from the framework
+	 * physically drives the NCS pin.
+	 */
+	mindgrove_spi_ctrl_disable(spi);
+
+	dev_dbg(spi->dev,
+		 "xfer END: ret=%d CTRL=0x%08x NCS_CTRL=0x%08x\n",
+		 ret,
+		 readl(spi->base + MINDGROVE_SPI_REG_CTRL),
+		 readl(spi->base + MINDGROVE_SPI_REG_NCS_CTRL));
+
+	return ret;
 }
 
-static void secure_iot_spi_remove(struct platform_device *pdev)
+/* ------------------------------------------------------------------ */
+/* Hardware initialisation                                             */
+/* ------------------------------------------------------------------ */
+
+static int mindgrove_spi_init_hw(struct mindgrove_spi *spi)
 {
-    struct spi_controller *host = platform_get_drvdata(pdev);
-    struct secure_iot_spi *spi = spi_controller_get_devdata(host);
-    /*disable all the interrupts*/
-    writel(0,spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-    clk_disable_unprepare(spi->clk);
+	unsigned long flags;
+
+	spin_lock_irqsave(&spi->lock, flags);
+
+	spi->num_cs = MINDGROVE_SPI_MAX_CS;
+
+	/*
+	 * Temporary writes of 0 are only used during the flush sequence.
+	 * After this block, CTRL must never be written as 0 again.
+	 */
+
+	/* Disable engine */
+	writel(0, spi->base + MINDGROVE_SPI_REG_CTRL);
+	/* Flush RX FIFO */
+	writel(MINDGROVE_SPI_CTRL_RX_FLUSH(1), spi->base + MINDGROVE_SPI_REG_CTRL);
+	writel(0, spi->base + MINDGROVE_SPI_REG_CTRL);
+	/* Master mode (SLAVE_MODE=0 is a no-op write of 0, but matches U-Boot) */
+	writel(MINDGROVE_SPI_CTRL_SLAVE_MODE(0), spi->base + MINDGROVE_SPI_REG_CTRL);
+
+	/*
+	 * CLK_CTRL: setup=1, hold=1, prescaler=2 (16.67 MHz at 50 MHz input).
+	 * Full write clears any stale prescaler left by BBL/U-Boot.
+	 */
+	writel((MINDGROVE_SPI_INIT_PRESCALER << MINDGROVE_SPI_CLK_CTRL_PRESCALAR_SHIFT) |
+	       (1u << MINDGROVE_SPI_CLK_CTRL_SETUP_SHIFT) |
+	       (1u << MINDGROVE_SPI_CLK_CTRL_HOLD_SHIFT),
+	       spi->base + MINDGROVE_SPI_REG_CLK_CTRL);
+
+	spi->spi_freq  = spi->input_clk_hz / (MINDGROVE_SPI_INIT_PRESCALER + 1);
+	spi->prescaler = MINDGROVE_SPI_INIT_PRESCALER;
+
+	/*
+	 * NCS_CTRL: CS0 selected (SELECT=1), SW=1 (NCS HIGH = deasserted).
+	 * set_cs() will drive SW=0 when the first message starts.
+	 */
+	writel(MINDGROVE_SPI_NCS_CTRL_SELECT(1) | MINDGROVE_SPI_NCS_CTRL_SW(1),
+	       spi->base + MINDGROVE_SPI_REG_NCS_CTRL);
+
+	/*
+	 * CRITICAL: set output-enable bits permanently.
+	 *
+	 * NCS_OUTEN must be set for NCS_CTRL.SW to physically drive the
+	 * CS pin.  We keep all three output-enables on at all times and
+	 * only toggle the EN bit per-transfer.
+	 *
+	 * Engine is idle (EN=0), pins are driven to their idle states:
+	 *   NCS driven by NCS_CTRL.SW = 1 → HIGH (deasserted) ✓
+	 *   SCLK idle per CPOL ✓
+	 *   MOSI idle ✓
+	 */
+	writel(MINDGROVE_SPI_CTRL_PIN_MASK, spi->base + MINDGROVE_SPI_REG_CTRL);
+
+	spin_unlock_irqrestore(&spi->lock, flags);
+
+	dev_dbg(spi->dev,
+		 "init_hw done:\n"
+		 "  CTRL=0x%08x (expect 0x%08x)\n"
+		 "  CLK_CTRL=0x%08x\n"
+		 "  NCS_CTRL=0x%08x (expect 0x00000003)\n"
+		 "  FIFO_STATUS=0x%08x COMM_STATUS=0x%04x\n",
+		 readl(spi->base + MINDGROVE_SPI_REG_CTRL),
+		 MINDGROVE_SPI_CTRL_PIN_MASK,
+		 readl(spi->base + MINDGROVE_SPI_REG_CLK_CTRL),
+		 readl(spi->base + MINDGROVE_SPI_REG_NCS_CTRL),
+		 readl(spi->base + MINDGROVE_SPI_REG_FIFO_STATUS),
+		 readw(spi->base + MINDGROVE_SPI_REG_COMM_STATUS));
+
+	return 0;
 }
 
-static int secure_iot_spi_probe(struct platform_device *pdev){
-    struct secure_iot_spi *spi;
-    int ret, irq, num_cs;
-    u32 cs_bits ,max_bits_per_word;
-    struct spi_controller *host;
+/* ------------------------------------------------------------------ */
+/* Platform driver probe / remove                                       */
+/* ------------------------------------------------------------------ */
 
-    host= spi_alloc_host(&pdev->dev, sizeof(struct secure_iot_spi));
-    // Instead of host = spi_alloc_host(...)
-    //host = spi_alloc_master(&pdev->dev, sizeof(struct secure_iot_spi)); 
-    if(!host){
-        dev_err(&pdev->dev ," Out of memory \n");
-        return -ENOMEM;
-    }
-    spi =spi_controller_get_devdata(host);
-
-    init_completion(&spi->done);
-    init_completion(&spi->tx_done);   // ADD THIS
-    init_completion(&spi->rx_done);   // ADD THIS
-
-    spi->dev = &pdev->dev;
-    init_completion(&spi->done);
-    platform_set_drvdata(pdev,host);
-
-    spi->regs = devm_platform_ioremap_resource(pdev,0);
-    if(IS_ERR(spi->regs)){
-        ret = PTR_ERR(spi->regs);
-        goto put_host;
-    }
-
-    spi->clk = devm_clk_get(&pdev->dev,NULL);
-    if(IS_ERR(spi->clk)) {
-        dev_err(&pdev->dev, "Unable to find bus clock \n");
-        ret = PTR_ERR(spi->clk);
-        goto put_host;
-    }
-
-    irq = platform_get_irq(pdev,0);
-    // Is it generic plic or very specific to secure_iot hardware?
-    if(irq < 0){
-        ret = irq;
-        goto put_host;
-    }
-
-    /*optional paramenters input to spi from dts input*/
-    ret = of_property_read_u32(pdev->dev.of_node,"mindgrove,fifo-depth",
-                                                    &spi->fifo_depth);
-    if(ret < 0){
-        spi->fifo_depth = MINDGROVE_SPI_DEFAULT_DEPTH;
-    }
-    ret = of_property_read_u32(pdev->dev.of_node,"mindgrove,max-bits-per-word",
-                                                    &max_bits_per_word);
-    if(!ret && max_bits_per_word < 8){
-        dev_err(&pdev->dev ,"Only 8bit SPI words supported by the driver \n");
-        ret = -EINVAL;
-        goto put_host;
-    }
-    /* Spin up the clock before hitting on the registers. */
-    ret = clk_prepare_enable(spi->clk);
-    if(ret) {
-        dev_err(&pdev->dev," Unable to enable the clock bus in the system bus\n");
-        goto put_host;
-    }
-
-    if (of_property_read_u32(pdev->dev.of_node, "num-cs", &num_cs))
-        num_cs = 1; // Default to 1 if not in DTS
-
-
-    /*defining of the host for argument passing*/
-    //host->bus_num = pdev->id;
-    // host->bus_num = of_alias_get_id(pdev->dev.of_node, "spi");
-    // if (host->bus_num < 0)
-    //     host->bus_num = -1;  /* let kernel auto-assign if no alias */
-    u32 bus_num=0;
-    if (of_property_read_u32(pdev->dev.of_node, "mindgrove,bus-num", &bus_num))
-        host->bus_num = -1;  /* auto-assign */
-    else
-        host->bus_num = bus_num;
-    host->num_chipselect = num_cs;
-    //host->mode_bits = (SPI_CPHA&1) | (SPI_CPOL&(1<<1)) | (SPI_LSB_FIRST&(1<<3) ) | (SPI_CS_HIGH & (1<<2));
-    host->mode_bits = SPI_CPHA | SPI_CPOL | SPI_LSB_FIRST | SPI_CS_HIGH;
-    /*Check what is the case of this implementation. */
-    host->bits_per_word_mask = SPI_BPW_MASK(8);
-    host->prepare_message = secure_iot_spi_prepare_message;
-    host->set_cs = secure_iot_spi_set_cs;
-    host->transfer_one = secure_iot_spi_transfer_one;
-    pdev->dev.dma_mask =NULL;
-    spi->polling=1; 
-    /*Initial flag check for fully using polling for transfer.*/
-    /*configure spi host hardware*/
-
-    secure_iot_spi_init(spi);
-    /*register for spi interrupt*/
-    ret = devm_request_irq(&pdev->dev , irq , secure_iot_spi_irq, 0, dev_name(&pdev->dev),spi);
-    if(ret){
-        dev_err(&pdev->dev ,"Unable to find the interrupt\n");
-        goto disable_clk;
-    }
-    //debug info for getting information:
-    dev_info(&pdev->dev , "mapped: irq=%d , cs =%d\n",irq,host->num_chipselect);
-    ret = devm_spi_register_controller(&pdev->dev,host);
-    if(ret < 0){
-        dev_err(&pdev->dev ,"Spi register host failed to happen !\n");
-        goto disable_clk;
-    }
-    dev_info(&pdev->dev, "registered as spi%d, scanning children\n",
-         host->bus_num);
-
-    struct device_node *child;
-    for_each_child_of_node(pdev->dev.of_node, child) {
-        dev_info(&pdev->dev, "  child node: %pOF compatible=%s\n",
-             child,
-             of_get_property(child, "compatible", NULL) ?: "none");
-    }
-
-    return 0;
-
-    disable_clk:
-        clk_disable_unprepare(spi->clk);
-    put_host:
-        spi_controller_put(host);
-
-        return ret;
-
-}
-
-static int secure_iot_spi_suspend(struct device *dev)
+static int mindgrove_spi_probe(struct platform_device *pdev)
 {
-    struct spi_controller *host =dev_get_drvdata(dev);
-    struct secure_iot_spi *spi = spi_controller_get_devdata(host);
-    int ret;
-    ret = spi_controller_suspend(host);
-    if(ret){
-        return ret;
-    }
-    /*disabling of all the interrupts again just in case*/
-    writel(0,spi->regs+MINDGROVE_SPI_REG_INTR_EN);
-    clk_disable_unprepare(spi->clk);
-    return ret;
+	struct spi_master *master;
+	struct mindgrove_spi *spi;
+	struct resource *res;
+	int ret;
+
+	master = spi_alloc_master(&pdev->dev, sizeof(struct mindgrove_spi));
+	if (!master) {
+		dev_err(&pdev->dev, "SPI master allocation failed\n");
+		return -ENOMEM;
+	}
+
+	platform_set_drvdata(pdev, master);
+	spi = spi_master_get_devdata(master);
+	spi->dev    = &pdev->dev;
+	spi->master = master;
+	spin_lock_init(&spi->lock);
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res) {
+		dev_err(&pdev->dev, "No MEM resource\n");
+		ret = -ENODEV;
+		goto put_master;
+	}
+	spi->phys = res->start;
+
+	spi->base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(spi->base)) {
+		ret = PTR_ERR(spi->base);
+		dev_err(&pdev->dev, "ioremap failed: %d\n", ret);
+		goto put_master;
+	}
+
+	dev_dbg(&pdev->dev, "SPI registers: phys=%pa virt=%px\n",
+		 &spi->phys, spi->base);
+
+	if (of_property_read_u32(pdev->dev.of_node,
+				 "mindgrove,fifo-depth", &spi->fifo_depth))
+		spi->fifo_depth = MINDGROVE_SPI_DEFAULT_DEPTH;
+
+	if (of_property_read_u32(pdev->dev.of_node,
+				 "mindgrove,max-bits-per-word",
+				 &spi->bits_per_word))
+		spi->bits_per_word = MINDGROVE_SPI_DEFAULT_BITS;
+
+	spi->lsb_first = of_property_read_bool(pdev->dev.of_node,
+					       "mindgrove,lsb-first");
+	spi->cpha = of_property_read_bool(pdev->dev.of_node, "mindgrove,cpha");
+	spi->cpol = of_property_read_bool(pdev->dev.of_node, "mindgrove,cpol");
+	spi->input_clk_hz = 50000000;
+
+	if (of_property_read_u32(pdev->dev.of_node,
+				 "spi-max-frequency", &spi->spi_freq))
+		spi->spi_freq = MINDGROVE_SPI_MAX_FREQ;
+
+	ret = mindgrove_spi_init_hw(spi);
+	if (ret)
+		goto put_master;
+
+	master->dev.of_node	   = pdev->dev.of_node;
+	master->bus_num		   = pdev->id;
+	master->num_chipselect	   = MINDGROVE_SPI_MAX_CS;
+	master->bits_per_word_mask = SPI_BPW_MASK(spi->bits_per_word);
+	master->max_speed_hz	   = spi->input_clk_hz / 2;
+	master->min_speed_hz	   = spi->input_clk_hz / (0x3FFF + 1);
+	master->mode_bits	   = SPI_CPOL | SPI_CPHA | SPI_LSB_FIRST | SPI_CS_HIGH;
+
+	master->setup		  = mindgrove_spi_setup;
+	master->prepare_message	  = mindgrove_spi_prepare_msg;
+	master->unprepare_message = mindgrove_spi_unprepare_msg;
+	master->transfer_one	  = mindgrove_spi_transfer_one;
+	master->set_cs		  = mindgrove_spi_set_cs;
+
+	ret = spi_register_master(master);
+	if (ret) {
+		dev_err(&pdev->dev, "Failed to register SPI master: %d\n", ret);
+		goto put_master;
+	}
+
+	dev_dbg(&pdev->dev, "Mindgrove SPI registered (clk=%u Hz, fifo=%u)\n",
+		 spi->input_clk_hz, spi->fifo_depth);
+	return 0;
+
+put_master:
+	spi_master_put(master);
+	return ret;
 }
 
-static int secure_iot_spi_resume(struct device *dev)
+static int mindgrove_spi_remove(struct platform_device *pdev)
 {
-    struct spi_controller *host = dev_get_drvdata(dev);
-    struct secure_iot_spi *spi = spi_controller_get_devdata(host);
-    int ret;
-    ret = clk_prepare_enable(spi->clk);
-    if(ret){
-        return ret;
-    }
-    ret = spi_controller_resume(host);
-    if(ret){
-        clk_disable_unprepare(spi->clk);
-    }
-    return ret;
+	struct spi_master *master = platform_get_drvdata(pdev);
+	struct mindgrove_spi *spi = spi_master_get_devdata(master);
 
+	/* Full disable on remove is fine since the device is going away */
+	writel(0, spi->base + MINDGROVE_SPI_REG_CTRL);
+	spi_unregister_master(master);
+	return 0;
 }
-
-
-
-/********************************************************
- * Basic struct definitions for spi recognitons
- * 
- * Call backs links defined
- * 
- *********************************************************/
-
-static DEFINE_SIMPLE_DEV_PM_OPS(secure_iot_spi_pm_ops,
-				secure_iot_spi_suspend, secure_iot_spi_resume);
-
 
 static const struct of_device_id mindgrove_spi_of_match[] = {
-	{ .compatible = "mindgrove,spi", },
+	{ .compatible = "mindgrove,spi" },
 	{}
 };
 MODULE_DEVICE_TABLE(of, mindgrove_spi_of_match);
 
 static struct platform_driver mindgrove_spi_driver = {
-	.probe = secure_iot_spi_probe,
-	.remove = secure_iot_spi_remove,
+	.probe  = mindgrove_spi_probe,
+	.remove = mindgrove_spi_remove,
 	.driver = {
-		.name = SECURE_IOT_SPI_DRIVER_NAME,
-		.pm = &secure_iot_spi_pm_ops,
-		.of_match_table = mindgrove_spi_of_match,
+		.name		= MINDGROVE_SPI_DRIVER_NAME,
+		.of_match_table	= mindgrove_spi_of_match,
 	},
 };
-
 module_platform_driver(mindgrove_spi_driver);
 
-MODULE_AUTHOR("Biancaa Ramesh <biancaa2210329@ssn.edu.in>");
-MODULE_DESCRIPTION("SecureIoT SPI driver");
-MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:" MINDGROVE_SPI_DRIVER_NAME);
+MODULE_AUTHOR("Evil Gorg");
+MODULE_DESCRIPTION("Mindgrove SPI controller driver");
+MODULE_LICENSE("GPL v2");
