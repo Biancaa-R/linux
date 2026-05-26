@@ -34,7 +34,7 @@
 #define MINDGROVE_SPI_DEFAULT_DEPTH	32
 #define MINDGROVE_SPI_DEFAULT_BITS	8
 #define MINDGROVE_SPI_TIMEOUT_US	1000000
-#define MINDGROVE_SPI_MAX_FREQ		35000000
+#define MINDGROVE_SPI_MAX_FREQ		10000000
 #define MINDGROVE_SPI_INIT_PRESCALER	2u	/* 50MHz/(2+1) = 16.67 MHz */
 #define MINDGROVE_SPI_YIELD_INTERVAL	64
 
@@ -599,7 +599,7 @@ static int mindgrove_spi_probe(struct platform_device *pdev)
 					       "mindgrove,lsb-first");
 	spi->cpha = of_property_read_bool(pdev->dev.of_node, "mindgrove,cpha");
 	spi->cpol = of_property_read_bool(pdev->dev.of_node, "mindgrove,cpol");
-	spi->input_clk_hz = 50000000;
+	spi->input_clk_hz = 30000000;
 
 	if (of_property_read_u32(pdev->dev.of_node,
 				 "spi-max-frequency", &spi->spi_freq))
