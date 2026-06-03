@@ -18,6 +18,7 @@
 #include <linux/crc7.h>
 #include <linux/crc-itu-t.h>
 #include <linux/scatterlist.h>
+#include <linux/of.h>
 
 #include <linux/mmc/host.h>
 #include <linux/mmc/mmc.h>		/* for R1_SPI_* bit values */
@@ -150,7 +151,7 @@ static int mmc_spi_readbytes(struct mmc_spi_host *host, unsigned int len)
 
 	host->status.len = len;
 
-	return spi_sync_locked(host->spi, &host->readback);
+	return spi_sync(host->spi, &host->readback);
 }
 
 static int mmc_spi_skip(struct mmc_spi_host *host, unsigned long timeout,
@@ -486,7 +487,7 @@ mmc_spi_command_send(struct mmc_spi_host *host,
 	t->cs_change = 1;
 	spi_message_add_tail(t, &host->m);
 
-	status = spi_sync_locked(host->spi, &host->m);
+	status = spi_sync(host->spi, &host->m);
 	if (status < 0) {
 		dev_dbg(&host->spi->dev, "  ... write returned %d\n", status);
 		cmd->error = status;
@@ -598,7 +599,7 @@ mmc_spi_writeblock(struct mmc_spi_host *host, struct spi_transfer *t,
 	if (host->mmc->use_spi_crc)
 		scratch->crc_val = cpu_to_be16(crc_itu_t(0, t->tx_buf, t->len));
 
-	status = spi_sync_locked(spi, &host->m);
+	status = spi_sync(spi, &host->m);
 	if (status != 0) {
 		dev_dbg(&spi->dev, "write error (%d)\n", status);
 		return status;
@@ -715,7 +716,7 @@ mmc_spi_readblock(struct mmc_spi_host *host, struct spi_transfer *t,
 	}
 	leftover = status << 1;
 
-	status = spi_sync_locked(spi, &host->m);
+	status = spi_sync(spi, &host->m);
 	if (status < 0) {
 		dev_dbg(&spi->dev, "read error %d\n", status);
 		return status;
@@ -867,7 +868,7 @@ mmc_spi_data_do(struct mmc_spi_host *host, struct mmc_command *cmd,
 		host->early_status.tx_buf = host->early_status.rx_buf;
 		host->early_status.len = statlen;
 
-		tmp = spi_sync_locked(spi, &host->m);
+		tmp = spi_sync(spi, &host->m);
 		if (tmp < 0) {
 			if (!data->error)
 				data->error = tmp;
@@ -930,7 +931,7 @@ static void mmc_spi_request(struct mmc_host *mmc, struct mmc_request *mrq)
 #endif
 
 	/* request exclusive bus access */
-	spi_bus_lock(host->spi->controller);
+	//spi_bus_lock(host->spi->controller);
 
 crc_recover:
 	/* issue command; then optionally data and stop */
@@ -962,7 +963,7 @@ crc_recover:
 	}
 
 	/* release the bus */
-	spi_bus_unlock(host->spi->controller);
+	//spi_bus_unlock(host->spi->controller);
 
 	mmc_request_done(host->mmc, mrq);
 }
