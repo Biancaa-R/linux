@@ -73,7 +73,8 @@ void mmc_gpio_set_cd_irq(struct mmc_host *host, int irq)
 EXPORT_SYMBOL(mmc_gpio_set_cd_irq);
 
 int mmc_gpio_get_ro(struct mmc_host *host)
-{
+{	
+	pr_err("MMC_SPI: gpio get RO start function\n");
 	struct mmc_gpio *ctx = host->slot.handler_priv;
 	int cansleep;
 
@@ -84,11 +85,13 @@ int mmc_gpio_get_ro(struct mmc_host *host)
 	return cansleep ?
 		gpiod_get_value_cansleep(ctx->ro_gpio) :
 		gpiod_get_value(ctx->ro_gpio);
+	pr_err("MMC_SPI: gpio get RO stop function\n");
 }
 EXPORT_SYMBOL(mmc_gpio_get_ro);
 
 int mmc_gpio_get_cd(struct mmc_host *host)
-{
+{	
+	pr_err("MMC_SPI: inside mmc gpio get cd function start\n");
 	struct mmc_gpio *ctx = host->slot.handler_priv;
 	int cansleep;
 
@@ -99,6 +102,7 @@ int mmc_gpio_get_cd(struct mmc_host *host)
 	return cansleep ?
 		gpiod_get_value_cansleep(ctx->cd_gpio) :
 		gpiod_get_value(ctx->cd_gpio);
+	pr_err("MMC_SPI: gpio getcd function stop \n");
 }
 EXPORT_SYMBOL(mmc_gpio_get_cd);
 

@@ -644,16 +644,22 @@ static int mmc_validate_host_caps(struct mmc_host *host)
 int mmc_add_host(struct mmc_host *host)
 {
 	int err;
-
+	pr_err("Inside the MMC SPI add host: before validate host caps function");
 	err = mmc_validate_host_caps(host);
-	if (err)
+	pr_err("Inside the MMC SPI add host: after validate host caps function");
+	if (err){
+		pr_err("Inside the MMC SPI add host: ERROR validate host caps function");
 		return err;
-
+	}
+	pr_err("Inside the MMC SPI add host: before device add function");
 	err = device_add(&host->class_dev);
-	if (err)
+	pr_err("Inside the MMC SPI add host: after device add function");
+	if (err){
+		pr_err("Inside the MMC SPI add host: ERROR device add function");
 		return err;
+	}
 
-	led_trigger_register_simple(dev_name(&host->class_dev), &host->led);
+	//led_trigger_register_simple(dev_name(&host->class_dev), &host->led);
 
 	mmc_add_host_debugfs(host);
 

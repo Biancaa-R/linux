@@ -139,6 +139,8 @@ struct mmc_spi_host {
 static inline int mmc_cs_off(struct mmc_spi_host *host)
 {
 	/* chipselect will always be inactive after setup() */
+	pr_err("MMC_SPI: MMC cs off function call\n");
+	pr_err("MMC_SPI: MMC cs off end function\n");
 	return spi_setup(host->spi);
 }
 
@@ -901,6 +903,7 @@ static void mmc_spi_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	int			status = -EINVAL;
 	int			crc_retry = 5;
 	struct mmc_command	stop;
+	pr_err("MMC_SPI: spi request START\n");
 
 #ifdef DEBUG
 	/* MMC core and layered drivers *MUST* issue SPI-aware commands */
@@ -964,6 +967,7 @@ crc_recover:
 
 	/* release the bus */
 	//spi_bus_unlock(host->spi->controller);
+	pr_err("MMC_SPI: SPI request end \n");
 
 	mmc_request_done(host->mmc, mrq);
 }
@@ -981,8 +985,11 @@ static void mmc_spi_initsequence(struct mmc_spi_host *host)
 	/* Try to be very sure any previous command has completed;
 	 * wait till not-busy, skip debris from any old commands.
 	 */
+	pr_err("MMC_SPI: initsequence START\n");
 	mmc_spi_wait_unbusy(host, msecs_to_jiffies(MMC_SPI_INIT_TIMEOUT_MS));
+	pr_err("MMC_SPI: initsequence after wait_unbusy\n");
 	mmc_spi_readbytes(host, 10);
+	pr_err("MMC_SPI: initsequence after readbytes 10\n");
 
 	/*
 	 * Do a burst with chipselect active-high.  We need to do this to
@@ -1004,25 +1011,27 @@ static void mmc_spi_initsequence(struct mmc_spi_host *host)
 	 * we should toggle the default with an XOR as we do here.
 	 */
 	host->spi->mode ^= SPI_CS_HIGH;
+	pr_err("MMC_SPI: Selected mode value of %d\n",host->spi->mode);
 	if (spi_setup(host->spi) != 0) {
 		/* Just warn; most cards work without it. */
 		dev_warn(&host->spi->dev,
 				"can't change chip-select polarity\n");
 		host->spi->mode ^= SPI_CS_HIGH;
 	} else {
+		pr_err("MMC_SPI: before the read bytes line \n");
 		mmc_spi_readbytes(host, 18);
 
 		host->spi->mode ^= SPI_CS_HIGH;
 		if (spi_setup(host->spi) != 0) {
 			/* Wot, we can't get the same setup we had before? */
-			dev_err(&host->spi->dev,
-					"can't restore chip-select polarity\n");
+			dev_err(&host->spi->dev,"can't restore chip-select polarity\n");
 		}
 	}
 }
 
 static char *mmc_powerstring(u8 power_mode)
 {
+	pr_err("MMC_SPI: MMC power string function init\n");
 	switch (power_mode) {
 	case MMC_POWER_OFF: return "off";
 	case MMC_POWER_UP:  return "up";
@@ -1034,6 +1043,8 @@ static char *mmc_powerstring(u8 power_mode)
 static void mmc_spi_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	struct mmc_spi_host *host = mmc_priv(mmc);
+	pr_err("MMC_SPI: set_ios power_mode=%d clock=%d\n", 
+            ios->power_mode, ios->clock);
 
 	if (host->power_mode != ios->power_mode) {
 		int		canpower;
@@ -1116,6 +1127,9 @@ static void mmc_spi_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		dev_dbg(&host->spi->dev, "  clock to %d Hz, %d\n",
 			host->spi->max_speed_hz, status);
 	}
+
+	pr_err("MMC_SPI: End checking set_ios power_mode=%d clock=%d\n", 
+        ios->power_mode, ios->clock);
 }
 
 static const struct mmc_host_ops mmc_spi_ops = {
@@ -1151,7 +1165,8 @@ static int mmc_spi_probe(struct spi_device *spi)
 	bool			has_ro = false;
 
 	// Debug print inside mmc probe function
-	printk(KERN_INFO,"Inside the MMC SPI probe function in secureIoT :/");
+	pr_err("MMC_SPI: probe called\n");
+	pr_err("Inside the MMC SPI probe function in secureIoT :/");
 
 	/* We rely on full duplex transfers, mostly to reduce
 	 * per-transfer overheads (by making fewer transfers).
@@ -1168,8 +1183,9 @@ static int mmc_spi_probe(struct spi_device *spi)
 	if (spi->mode != SPI_MODE_3)
 		spi->mode = SPI_MODE_0;
 	spi->bits_per_word = 8;
-
+	pr_err("Inside the MMC SPI probe before spi setup");
 	status = spi_setup(spi);
+	pr_err("Inside the MMC SPI probe after spi setup");
 	if (status < 0) {
 		dev_dbg(&spi->dev, "needs SPI mode %02x, %d KHz; %d\n",
 				spi->mode, spi->max_speed_hz / 1000,
@@ -1184,12 +1200,15 @@ static int mmc_spi_probe(struct spi_device *spi)
 	 * it'd save some memory to share this.  That's evidently rare.
 	 */
 	status = -ENOMEM;
+	pr_err("Inside the MMC SPI probe before alocating the block size");
 	ones = kmalloc(MMC_SPI_BLOCKSIZE, GFP_KERNEL);
 	if (!ones)
 		goto nomem;
 	memset(ones, 0xff, MMC_SPI_BLOCKSIZE);
+	pr_err("Inside the MMC SPI probe after allocating of the block size");
 
 	mmc = devm_mmc_alloc_host(&spi->dev, sizeof(*host));
+	pr_err("Inside the MMC SPI probe after allocating of mmc host");
 	if (!mmc)
 		goto nomem;
 
@@ -1221,12 +1240,18 @@ static int mmc_spi_probe(struct spi_device *spi)
 
 	host->ones = ones;
 
+	pr_err("Inside the MMC SPI probe before spi set driver data");
+
 	dev_set_drvdata(&spi->dev, mmc);
+
+	pr_err("Inside the MMC SPI probe after spi setup driver data");
 
 	/* Platform data is used to hook up things like card sensing
 	 * and power switching gpios.
 	 */
+	pr_err("Inside the MMC SPI probe before spi get driver data");
 	host->pdata = mmc_spi_get_pdata(spi);
+	pr_err("Inside the MMC SPI probe after spi get driver data");
 	if (host->pdata)
 		mmc->ocr_avail = host->pdata->ocr_mask;
 	if (!mmc->ocr_avail) {
@@ -1245,9 +1270,14 @@ static int mmc_spi_probe(struct spi_device *spi)
 		goto fail_nobuf1;
 
 	/* setup message for status/busy readback */
+	pr_err("Inside the MMC SPI probe before spi message init start");
 	spi_message_init(&host->readback);
+	pr_err("Inside the MMC SPI probe after spi message init start");
+	pr_err("Inside the MMC SPI probe before spi message add tail start");
 
 	spi_message_add_tail(&host->status, &host->readback);
+	pr_err("Inside the MMC SPI probe after spi message add tail");
+
 	host->status.tx_buf = host->ones;
 	host->status.rx_buf = &host->data->status;
 	host->status.cs_change = 1;
@@ -1264,16 +1294,18 @@ static int mmc_spi_probe(struct spi_device *spi)
 		mmc->caps |= host->pdata->caps;
 		mmc->caps2 |= host->pdata->caps2;
 	}
-
+	pr_err("Inside the MMC SPI probe before mmc spi add host");
 	status = mmc_add_host(mmc);
-	if (status != 0)
+	if (status != 0){
+		pr_err("Inside the MMC spi : FAIL Glue init function");
 		goto fail_glue_init;
-
+	}
+	pr_err("Inside the MMC SPI probe after spi add host");
 	/*
 	 * Index 0 is card detect
 	 * Old boardfiles were specifying 1 ms as debounce
 	 */
-	printk(KERN_INFO,"Inside the MMC SPI probe function in secureIoT before request CD :/\n");
+	pr_err("Inside the MMC SPI probe function in secureIoT before request CD :/\n");
 	status = mmc_gpiod_request_cd(mmc, NULL, 0, false, 1000);
 	if (status == -EPROBE_DEFER)
 		goto fail_gpiod_request;
@@ -1293,7 +1325,7 @@ static int mmc_spi_probe(struct spi_device *spi)
         mmc->caps |= MMC_CAP_NEEDS_POLL;
 	}
 	mmc_detect_change(mmc, 0);
-	printk(KERN_INFO,"Inside the MMC SPI probe function in secureIoT after the MMC detect change of card:/\n");
+	pr_err("Inside the MMC SPI probe function in secureIoT after the MMC detect change of card:/\n");
 
 	/* Index 1 is write protect/read only */
 	status = mmc_gpiod_request_ro(mmc, NULL, 1, 0);
@@ -1302,7 +1334,7 @@ static int mmc_spi_probe(struct spi_device *spi)
 	if (!status)
 		has_ro = true;
 	
-	printk(KERN_INFO,"Inside the MMC SPI probe function in secureIoT just before dev info function  :/\n");
+	pr_err("Inside the MMC SPI probe function in secureIoT just before dev info function  :/\n");
 
 	dev_info(&spi->dev, "SD/MMC host %s%s%s%s\n",
 			dev_name(&mmc->class_dev),
@@ -1311,7 +1343,14 @@ static int mmc_spi_probe(struct spi_device *spi)
 				? "" : ", no poweroff",
 			(mmc->caps & MMC_CAP_NEEDS_POLL)
 				? ", cd polling" : "");
-	printk(KERN_INFO,"Inside the MMC SPI probe function in secureIoT before the final return :/\n");
+	// pr_err("SD/MMC host %s%s%s%s\n",
+	// 		dev_name(&mmc->class_dev),
+	// 		has_ro ? "" : ", no WP",
+	// 		(host->pdata && host->pdata->setpower)
+	// 			? "" : ", no poweroff",
+	// 		(mmc->caps & MMC_CAP_NEEDS_POLL)
+	// 			? ", cd polling" : "");
+	pr_err("Inside the MMC SPI probe function in secureIoT before the final return :/\n");
 	return 0;
 
 fail_gpiod_request:

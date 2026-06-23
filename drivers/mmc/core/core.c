@@ -2254,6 +2254,8 @@ void mmc_rescan(struct work_struct *work)
 		container_of(work, struct mmc_host, detect.work);
 	int i;
 
+	pr_err("!!!! MMC CORE: inside mmc_rescan worker thread !!!!\n");
+
 	if (host->rescan_disable)
 		return;
 

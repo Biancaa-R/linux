@@ -3576,17 +3576,17 @@ int device_add(struct device *dev)
 	struct class_interface *class_intf;
 	int error = -EINVAL;
 	struct kobject *glue_dir = NULL;
-
+	pr_err("Inside the MMC SPI device add 1");
 	dev = get_device(dev);
 	if (!dev)
 		goto done;
-
+	pr_err("Inside the MMC SPI device add 2");
 	if (!dev->p) {
 		error = device_private_init(dev);
 		if (error)
 			goto done;
 	}
-
+	pr_err("Inside the MMC SPI device add 3");
 	/*
 	 * for statically allocated devices, which should all be converted
 	 * some day, we need to initialize the name. We prevent reading back
@@ -3596,7 +3596,7 @@ int device_add(struct device *dev)
 		error = dev_set_name(dev, "%s", dev->init_name);
 		dev->init_name = NULL;
 	}
-
+	pr_err("Inside the MMC SPI device add 4");
 	if (dev_name(dev))
 		error = 0;
 	/* subsystems can specify simple device enumeration */
@@ -3606,8 +3606,8 @@ int device_add(struct device *dev)
 		error = -EINVAL;
 	if (error)
 		goto name_error;
-
-	pr_debug("device: '%s': %s\n", dev_name(dev), __func__);
+	pr_err("Inside the MMC SPI device add 5");
+	pr_err("device: '%s': %s\n", dev_name(dev), __func__);
 
 	parent = get_device(dev->parent);
 	kobj = get_device_parent(dev, parent);
@@ -3617,11 +3617,11 @@ int device_add(struct device *dev)
 	}
 	if (kobj)
 		dev->kobj.parent = kobj;
-
+	pr_err("Inside the MMC SPI device add 6");
 	/* use parent numa_node */
 	if (parent && (dev_to_node(dev) == NUMA_NO_NODE))
 		set_dev_node(dev, dev_to_node(parent));
-
+	pr_err("Inside the MMC SPI device add 7");
 	/* first, register with generic layer. */
 	/* we require the name to be set before, and pass NULL */
 	error = kobject_add(&dev->kobj, dev->kobj.parent, NULL);
@@ -3629,9 +3629,10 @@ int device_add(struct device *dev)
 		glue_dir = kobj;
 		goto Error;
 	}
-
+	pr_err("Inside the MMC SPI device add 8");
 	/* notify platform of device entry */
 	device_platform_notify(dev);
+	pr_err("Inside the MMC SPI device add 9");
 
 	error = device_create_file(dev, &dev_attr_uevent);
 	if (error)
@@ -3668,6 +3669,8 @@ int device_add(struct device *dev)
 	 */
 	bus_notify(dev, BUS_NOTIFY_ADD_DEVICE);
 	kobject_uevent(&dev->kobj, KOBJ_ADD);
+
+	pr_err("Inside the MMC SPI device add 10");
 
 	/*
 	 * Check if any of the other devices (consumers) have been waiting for

@@ -65,12 +65,20 @@ void mmc_regulator_register_undervoltage_notifier(struct mmc_host *host);
 void mmc_regulator_unregister_undervoltage_notifier(struct mmc_host *host);
 void mmc_undervoltage_workfn(struct work_struct *work);
 
+// static inline void mmc_delay(unsigned int ms)
+// {
+// 	if (ms <= 20)
+// 		usleep_range(ms * 1000, ms * 1250);
+// 	else
+// 		msleep(ms);
+// }
+
 static inline void mmc_delay(unsigned int ms)
 {
-	if (ms <= 20)
-		usleep_range(ms * 1000, ms * 1250);
-	else
-		msleep(ms);
+    /* * PLIC Bypass Hack: Force active busy-looping spins.
+     * Do NOT use usleep_range or msleep without working interrupts!
+     */
+    mdelay(ms); //relies on the cpu core for setting up of the delay in the system.
 }
 
 void mmc_rescan(struct work_struct *work);

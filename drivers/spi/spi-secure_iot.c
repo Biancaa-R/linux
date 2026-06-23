@@ -29,15 +29,18 @@
 #include <linux/spi/spi.h>
 #include <linux/types.h>
 #include <linux/vmalloc.h>
+#include <linux/jiffies.h>
+//u32 jiffies;
+extern unsigned long volatile jiffies;
 
 #define MINDGROVE_SPI_DRIVER_NAME	"mindgrove_spi"
 
-#define MINDGROVE_SPI_MAX_CS		4
+#define MINDGROVE_SPI_MAX_CS		2
 #define MINDGROVE_SPI_DEFAULT_DEPTH	32
 #define MINDGROVE_SPI_DEFAULT_BITS	8
 #define MINDGROVE_SPI_TIMEOUT_US	1000000
 #define MINDGROVE_SPI_MAX_FREQ		30000000
-#define MINDGROVE_SPI_INIT_PRESCALER	2u
+#define MINDGROVE_SPI_INIT_PRESCALER	4u
 #define MINDGROVE_SPI_YIELD_INTERVAL	64
 
 /* Register offsets */
@@ -182,17 +185,26 @@ static int mindgrove_spi_wait_complete(struct mindgrove_spi *spi)
 /* Caller MUST hold spi->lock */
 static int mindgrove_spi_set_speed_locked(struct mindgrove_spi *spi, u32 speed)
 { 
-	dev_dbg(spi->dev, "Inside mindgrove-spi speed locked function CTRL=0x%08x\n",readl(spi->base + MINDGROVE_SPI_REG_CTRL));
+	//dev_dbg(spi->dev, "Inside mindgrove-spi speed locked function CTRL=0x%08x\n",readl(spi->base + MINDGROVE_SPI_REG_CTRL));
 	u32 prescaler, clk_ctrl, actual_freq;
 
-	if (!speed)
+	if (!speed){
+		dev_dbg(spi->dev, "set_speed: Requested 0 Hz. Gating clock line safely.\n");	
 		return 0;
+	}
 
 	prescaler = spi->input_clk_hz / speed;
 	if (prescaler)
 		prescaler -= 1;
 	if (prescaler > 0x3FFF)
 		prescaler = 0x3FFF;
+
+	// Safety Clamp: If MMC asks for an ultra-low initialization clock,
+    // force it to your maximum safe divisor value instead of calculating endlessly.
+    if (speed < 1000000) {
+        pr_info("MGSPI: Requested speed %u Hz is below 1MHz. Clamping divisor to safe max.\n", speed);
+        prescaler = 0x3FFF; // Use your controller's maximum possible divider value
+	}
 
 	actual_freq = spi->input_clk_hz / (prescaler + 1);
 	if (actual_freq > MINDGROVE_SPI_MAX_FREQ) {
@@ -242,15 +254,15 @@ static int mindgrove_spi_set_speed_locked(struct mindgrove_spi *spi, u32 speed)
 // 		 ctrl, readl(spi->base + MINDGROVE_SPI_REG_CTRL));
 // }
 
-static void mindgrove_spi_prep(struct mindgrove_spi *spi, u32 len)
+static void mindgrove_spi_prep(struct mindgrove_spi *spi)
 {
     u32 ctrl;
-    u32 total_bits = len * spi->bits_per_word;
+    //u32 total_bits = len * spi->bits_per_word;
 
 	dev_dbg(spi->dev, "Inside mindgrove-spi_prep function CTRL=0x%08x\n",readl(spi->base + MINDGROVE_SPI_REG_CTRL));
     ctrl  = MINDGROVE_SPI_CTRL_COMM_MODE(MINDGROVE_SPI_COMM_MODE_FULL_DUPLEX);
-    ctrl |= MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(total_bits);
-    ctrl |= MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(total_bits);
+    ctrl |= MINDGROVE_SPI_CTRL_TOTAL_BIT_TX(spi->bits_per_word);
+    ctrl |= MINDGROVE_SPI_CTRL_TOTAL_BIT_RX(spi->bits_per_word);
     ctrl |= MINDGROVE_SPI_CTRL_PIN_MASK;    /* SCLK_OUTEN|NCS_OUTEN|MOSI_OUTEN */
     
     if (spi->lsb_first)
@@ -258,8 +270,11 @@ static void mindgrove_spi_prep(struct mindgrove_spi *spi, u32 len)
     ctrl |= MINDGROVE_SPI_CTRL_EN(1);
 
     writel(ctrl, spi->base + MINDGROVE_SPI_REG_CTRL);
-    dev_dbg(spi->dev, "prep: len=%u total_bits=%u CTRL=0x%08x\n",
-         len, total_bits, readl(spi->base + MINDGROVE_SPI_REG_CTRL));
+    // dev_dbg(spi->dev, "prep: len=%u total_bits=%u CTRL=0x%08x\n",
+    //      len, total_bits, readl(spi->base + MINDGROVE_SPI_REG_CTRL));
+	dev_dbg(spi->dev, "prep: CTRL=0x%08x\n",
+    		readl(spi->base + MINDGROVE_SPI_REG_CTRL));
+	dev_dbg(spi->dev ,"Outside the prep function execution\n");
 }
 
 static int mindgrove_spi_wait_tx_not_full(struct mindgrove_spi *spi)
@@ -349,13 +364,15 @@ static void mindgrove_spi_set_cs(struct spi_device *spi_dev, bool enable)
 
 	dev_dbg(spi->dev, "Inside the SPI set CS function\n ");
 
+	mindgrove_spi_ensure_pin_mask(spi);   // ADD THIS LINE
+
 	ncs_ctrl = readl(spi->base + MINDGROVE_SPI_REG_NCS_CTRL);
 
 	/* SW = (enable == cs_high) — see truth table above */
 	if (enable == cs_high)
 		ncs_ctrl &= ~MINDGROVE_SPI_NCS_CTRL_SW(1);/* SW=0 */
 	else	
-		ncs_ctrl |=  MINDGROVE_SPI_NCS_CTRL_SW(1);/* SW=0 */
+		ncs_ctrl |=  MINDGROVE_SPI_NCS_CTRL_SW(1);/* SW=1 */
 
 	writel(ncs_ctrl, spi->base + MINDGROVE_SPI_REG_NCS_CTRL);
 
@@ -421,7 +438,7 @@ static int mindgrove_spi_prepare_msg(struct spi_controller *ctlr,
 	unsigned long flags;
 	u32 speed;
 	int ret;
-	dev_dbg(spi->dev, "Inside mindgrove-spi_prepare msg function CTRL=0x%08x\n",readl(spi->base + MINDGROVE_SPI_REG_CTRL));
+	//dev_dbg(spi->dev, "Inside mindgrove-spi_prepare msg function CTRL=0x%08x\n",readl(spi->base + MINDGROVE_SPI_REG_CTRL));
 	//spin_lock_irqsave(&spi->lock, flags);
 
 
@@ -433,6 +450,14 @@ static int mindgrove_spi_prepare_msg(struct spi_controller *ctlr,
 	ret = mindgrove_spi_set_speed_locked(spi, speed);
 	spin_unlock_irqrestore(&spi->lock, flags);
 
+	/* Safe to call dev_dbg here since the spinlock is completely open */
+	if (!ret) {
+		dev_dbg(spi->dev,
+			 "prepare_msg: req_speed=%u actual=%u prescaler=%u CLK_CTRL=0x%08x\n",
+			 speed, spi->spi_freq, spi->prescaler,
+			 readl(spi->base + MINDGROVE_SPI_REG_CLK_CTRL));
+	}
+	
 	return ret;
 }
 
@@ -491,7 +516,7 @@ static int mindgrove_spi_transfer_one(struct spi_controller *ctlr,
 	/* Step 1: enable engine (CS already asserted by framework) */
 	//mindgrove_spi_prep(spi);
 	/* Step 1: enable engine with total block length constraint */
-    mindgrove_spi_prep(spi, len);
+    mindgrove_spi_prep(spi);
 
 	/* Step 2: byte loop */
 	for (i = 0; i < len; i++) {
@@ -538,6 +563,87 @@ out_disable:
 
 	return ret;
 }
+//The looked out check function 
+// static int mindgrove_spi_transfer_one(struct spi_controller *ctlr,
+//                       struct spi_device *spi_dev,
+//                       struct spi_transfer *t)
+// {
+//     struct mindgrove_spi *spi = spi_controller_get_devdata(ctlr);
+//     const u8 *tx_buf = t->tx_buf;
+//     u8 *rx_buf = t->rx_buf;
+//     u32 len = t->len;
+//     unsigned long flags;
+//     u32 speed;
+//     u32 tx_left = len, rx_left = len;
+//     int ret = 0;
+
+//     /* Per-transfer speed override */
+//     speed = t->speed_hz ? t->speed_hz : spi->spi_freq;
+//     if (!speed)
+//         speed = MINDGROVE_SPI_MAX_FREQ;
+
+//     spin_lock_irqsave(&spi->lock, flags);
+//     ret = mindgrove_spi_set_speed_locked(spi, speed);
+//     spin_unlock_irqrestore(&spi->lock, flags);
+//     if (ret)
+//         return ret;
+
+//     /* Step 1: Enable engine with total block length constraint */
+//     mindgrove_spi_prep(spi);
+
+//     /* Step 2: Pipelined TX/RX Loop to prevent lockstep deadlocks */
+//     while (tx_left > 0 || rx_left > 0) {
+//         bool progress = false;
+//         u32 status;
+
+//         status = readl(spi->base + MINDGROVE_SPI_REG_FIFO_STATUS);
+
+//         /* Keep filling TX FIFO while it is NOT full and we have data left */
+//         while (tx_left > 0 && !(status & MINDGROVE_SPI_FIFO_STATUS_TX_FULL)) {
+//             u8 tx_byte = tx_buf ? tx_buf[len - tx_left] : 0xFF;
+//             writeb(tx_byte, spi->base + MINDGROVE_SPI_REG_TX);
+//             tx_left--;
+//             progress = true;
+            
+//             // Re-read status to update TX Full condition inside the inner burst loop
+//             status = readl(spi->base + MINDGROVE_SPI_REG_FIFO_STATUS);
+//         }
+
+//         /* Keep draining RX FIFO while it is NOT empty and we expect data */
+//         while (rx_left > 0 && !(status & MINDGROVE_SPI_FIFO_STATUS_RX_EMPTY)) {
+//             u8 rx_byte = readb(spi->base + MINDGROVE_SPI_REG_RX);
+//             if (rx_buf)
+//                 rx_buf[len - rx_left] = rx_byte;
+//             rx_left--;
+//             progress = true;
+
+//             // Re-read status to update RX Empty condition inside the inner burst loop
+//             status = readl(spi->base + MINDGROVE_SPI_REG_FIFO_STATUS);
+//         }
+
+//         /* * Safety backup: If the hardware is busy shifting but hasn't updated 
+//          * status flags yet (causing 'progress' to be false), explicitly wait 
+//          * using your bounded timeout functions to prevent a tight CPU spin.
+//          */
+//         if (!progress) {
+//             if (tx_left > 0) {
+//                 ret = mindgrove_spi_wait_tx_not_full(spi);
+//                 if (ret) goto out_disable;
+//             } else if (rx_left > 0) {
+//                 ret = mindgrove_spi_wait_rx_not_empty(spi);
+//                 if (ret) goto out_disable;
+//             }
+//         }
+//     }
+
+//     /* Step 3: Wait for shift register idle */
+//     ret = mindgrove_spi_wait_complete(spi);
+
+// out_disable:
+//     /* Step 4: Disable engine */
+//     mindgrove_spi_ctrl_disable(spi);
+//     return ret;
+// }
 
 //Last but one version -> with a lot of debug prints
 
@@ -953,6 +1059,29 @@ static int mindgrove_spi_init_hw(struct mindgrove_spi *spi)
 // 	return 0;
 // }
 
+static int mindgrove_spi_transfer_one_message(struct spi_controller *ctlr,
+                                               struct spi_message *msg)
+{
+    struct mindgrove_spi *spi = spi_controller_get_devdata(ctlr);
+    struct spi_transfer *t;
+    int ret = 0;
+
+    mindgrove_spi_ensure_pin_mask(spi);
+    mindgrove_spi_set_cs(msg->spi, true);
+
+    list_for_each_entry(t, &msg->transfers, transfer_list) {
+        ret = mindgrove_spi_transfer_one(ctlr, msg->spi, t);
+        if (ret)
+            break;
+        msg->actual_length += t->len;
+    }
+
+    mindgrove_spi_set_cs(msg->spi, false);
+    msg->status = ret;
+    spi_finalize_current_message(ctlr);
+    return ret;
+}
+
 
 /* ------------------------------------------------------------------ */
 /* Platform driver probe / remove                                       */
@@ -1026,7 +1155,7 @@ static int mindgrove_spi_probe(struct platform_device *pdev)
 	else
 		spi->cpol = false;
 
-	spi->input_clk_hz = 30000000;
+	spi->input_clk_hz = 15000000;
 
 	if (of_property_read_u32(pdev->dev.of_node,
 				 "spi-max-frequency", &spi->spi_freq))
@@ -1035,9 +1164,21 @@ static int mindgrove_spi_probe(struct platform_device *pdev)
 	ret = mindgrove_spi_init_hw(spi);
 	if (ret)
 		goto put_ctlr;
-
+		
+	ctlr->auto_runtime_pm = false;
+	ctlr->use_gpio_descriptors = false;
+	ctlr->flags = 0;
+	//ctlr->max_transfer_size = MINDGROVE_SPI_DEFAULT_DEPTH;
+	ctlr->cs_gpiods = NULL;              /* no GPIO CS */
 	ctlr->dev.of_node	    = pdev->dev.of_node;
-	ctlr->bus_num		    = pdev->id;
+	// ctlr->bus_num		    = pdev->id;
+	ret = of_alias_get_id(pdev->dev.of_node,"spi");
+	if(ret>=0){
+		ctlr->bus_num=ret;
+	}
+	else{
+		ctlr->bus_num=pdev->id;
+	}
 	ctlr->num_chipselect	    = MINDGROVE_SPI_MAX_CS;
 	ctlr->bits_per_word_mask    = SPI_BPW_MASK(spi->bits_per_word);
 	ctlr->max_speed_hz	    = spi->input_clk_hz / 2;
@@ -1049,6 +1190,7 @@ static int mindgrove_spi_probe(struct platform_device *pdev)
 	ctlr->unprepare_message	    = mindgrove_spi_unprepare_msg;
 	ctlr->transfer_one	    = mindgrove_spi_transfer_one;
 	ctlr->set_cs		    = mindgrove_spi_set_cs;
+	//ctlr->transfer_one_message=mindgrove_spi_transfer_one_message;
 
 	ret = spi_register_controller(ctlr);
 	if (ret) {
@@ -1058,6 +1200,30 @@ static int mindgrove_spi_probe(struct platform_device *pdev)
 
 	dev_dbg(&pdev->dev, "Mindgrove SPI registered (clk=%u Hz, fifo=%u)\n",
 		 spi->input_clk_hz, spi->fifo_depth);
+
+	pr_info("mgspi: probe end\n");
+	pr_info("mgspi: setup cpol=%u cpha=%u lsb=%u bpw=%u req=%u div=%u\n",
+    	spi->cpol, spi->cpha, spi->lsb_first, spi->bits_per_word, spi->spi_freq, MINDGROVE_SPI_INIT_PRESCALER+1);
+
+	dev_info(&pdev->dev, "PLIC bypassed. Operating in explicit POLLING mode.\n");
+	// pr_info("mgspi: cmd=%u arg=0x%08x resp=%02x %02x %02x %02x err=%d\n",
+    //     cmd, arg, r0, r1, r2, r3, err);
+
+	pr_info("Before manual time jump: jiffies = %lu\n", jiffies);
+
+	// Forcefully advance the kernel's internal time forward by 50 system ticks
+	jiffies += 50; 
+
+	pr_info("After manual time jump: jiffies = %lu\n", jiffies);
+
+	pr_info("Chceking the working of the harware timer clock");
+
+	udelay(500);
+
+	pr_info("Chceking the working of the harware timer clock done");
+	pr_info("Trying to understand what is going on in the system bus number : %d",ctlr->bus_num);
+	pr_info("Trying to understand what is going on in the system mode bits : %d",ctlr->mode_bits);
+	pr_info("Trying to understand what is going on in the system queue empty? : %d",ctlr->queue_empty);
 	return 0;
 
 put_ctlr:
